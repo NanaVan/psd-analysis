@@ -62,7 +62,7 @@ class Preprocessing(object):
         def get_value(key):
             return next(root[0][0].iter(prefix + key)).text
         self.date_time = np.datetime64(get_value("DateTime"))
-        self.data_format = np.dtype(get_value("NumberFormat")).newbyteorder(get_value("Endian"))
+        self.data_format = np.dtype(get_value("NumberFormat").lower()).newbyteorder(get_value("Endian").lower())
         self.ref_level = float(get_value("ReferenceLevel")) # dBm
         self.center_frequency = float(get_value("Frequency")) # Hz
         self.span = float(get_value("AcquisitionBandwidth")) # Hz
