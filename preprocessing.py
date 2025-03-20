@@ -4,6 +4,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import xml.etree.ElementTree as ET
+from nptdms import TdmsFile
+from datetime import datetime, timedelta
 import json, sys, os.path
 
 class Preprocessing(object):
@@ -28,6 +30,9 @@ class Preprocessing(object):
         elif self.fname[-3:].lower() == "tiq":
             self.file_format = "tiq"
             self.extract_tiq()
+        elif self.fname[-4:].lower() == "tdms":
+            self.file_format = "tdms"
+            self.extract_tdms()
         else:
             print("Error: unrecognized file format!\nOnly 'wv' or 'tiq' file can be accepted.")
             sys.exit()
@@ -71,6 +76,22 @@ class Preprocessing(object):
         self.scaling = float(get_value("Scaling"))
         self.trig_pos = float(get_value("TriggerPosition")) # s
 
+    def extract_tdms(self):
+        '''
+        extract the metadata from the .tdms file
+        '''
+        with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+            try:
+                self.date_time = tdms['RecordHeader']['datetime'][0]
+            except:
+                self.date_time = np.datetime64(datetime.strptime(self.fpath.split('IQ_')[1], '%d_%m_%Y_%H_%M_%S') + timedelta(seconds=tdms['RecordHeader']['absolute timestamp'][0]))
+            self.span = 1/tdms['RecordHeader']['dt'][0]/1.25 # Hz
+            self.sampling_rate = 1/tdms['RecordHeader']['dt'][0] # Hz
+            self.gain = tdms['RecordHeader']['gain'][0]
+            self.n_sample = 0
+            for chunk in tdms.data_chunks():
+                self.n_sample += len(chunk['RecordData']['I'])
+
     def display(self):
         '''
         display all the parameters as a list
@@ -80,9 +101,12 @@ class Preprocessing(object):
         print("name of file\t\t\t" + self.fname)
         print("path to file\t\t\t" + self.fpath)
         print("timestamp in UTC \t\t" + str(self.date_time))
-        print("data format\t\t\t" + repr(self.data_format))
-        print("reference level\t\t\t{:g} dBm".format(self.ref_level))
-        print("center frequency\t\t{:g} MHz".format(self.center_frequency*1e-6))
+        try: # wv, tiq
+            print("data format\t\t\t" + repr(self.data_format))
+            print("reference level\t\t\t{:g} dBm".format(self.ref_level))
+            print("center frequency\t\t{:g} MHz".format(self.center_frequency*1e-6))
+        except AttributeError: 
+            pass
         print("span\t\t\t\t{:g} kHz".format(self.span*1e-3))
         print("sampling rate\t\t\t{:g} kHz".format(self.sampling_rate*1e-3))
         print("number of samples\t\t{:d} IQ pairs".format(self.n_sample))
@@ -91,9 +115,12 @@ class Preprocessing(object):
         try: # for wv
             print("digitizing depth\t\t{:d} bits".format(self.digitizing_depth))
             print("recording duration (set)\t{:g} s".format(self.duration))
-        except AttributeError: # for tiq
-            print("scaling\t\t\t\t{:g}".format(self.scaling))
-            print("trigger position\t\t{:g} s".format(self.trig_pos))
+        except AttributeError: 
+            try: # for tiq
+                print("scaling\t\t\t\t{:g}".format(self.scaling))
+                print("trigger position\t\t{:g} s".format(self.trig_pos))
+            except AttributeError: # for tdms
+                print("gain\t\t\t\t{:.5e}".format(self.gain))
         print("--------------------")
 
     def load(self, size, offset, decimating_factor=1, draw=False):
@@ -107,9 +134,30 @@ class Preprocessing(object):
         if self.file_format == "wv":
             wvd = np.memmap('/'.join((self.fpath, self.fname[:-3]+"wvd")), dtype=self.data_format, offset=offset*2*self.data_format.itemsize, mode='r')
             data = wvd[:2*size*decimating_factor].reshape(size,2*decimating_factor)[:,:2].flatten().astype(float).view(complex) / (2**(self.digitizing_depth-1) - .5) # V
-        else: # for tiq
+        elif self.file_format == "tiq": # for tiq
             tiq = np.memmap('/'.join((self.fpath, self.fname)), dtype=self.data_format, offset=self.n_offset+offset*2*self.data_format.itemsize, mode='r')
             data = tiq[:2*size*decimating_factor].reshape(size,2*decimating_factor)[:,:2].flatten().astype(float).view(complex) * self.scaling # V
+        else: # for tdms
+            def data_return(_chunk, _offset, _total_size):
+                if _offset >= len(_chunk):
+                    _offset -= len(_chunk)
+                    return _offset, _total_size, []
+                elif _total_size >= len(_chunk[_offset:]):
+                    _total_size -= len(_chunk[_offset:])
+                    return 0, _total_size, _chunk[_offset:]
+                else:
+                    return 0, 0, _chunk[_offset:_offset+_total_size]
+            with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+                I_data, Q_data = [], []
+                I_offset, Q_offset, I_total_size, Q_total_size = offset, offset, size*decimating_factor, size*decimating_factor
+                for chunk in tdms.data_chunks():
+                    I_offset, I_total_size, _I_data = data_return(chunk['RecordData']['I'], I_offset, I_total_size)
+                    I_data.append(_I_data)
+                    Q_offset, Q_total_size, _Q_data = data_return(chunk['RecordData']['Q'], Q_offset, Q_total_size)
+                    Q_data.append(_Q_data)
+                    if I_total_size == 0 and Q_total_size == 0:
+                        data = (np.hstack(I_data)[::decimating_factor] + 1j * np.hstack(Q_data)[::decimating_factor]) * self.gain # V
+                        break
         if draw:
             self.draw(times, data)
         else:
