@@ -2,8 +2,8 @@
 # -*- coding:utf-8 -*-
 
 import numpy as np
-import pyfftw, multiprocessing
-from scipy.signal.windows import dpss
+import pyfftw, multiprocessing, os
+from scipy.signal import windows
 
 from preprocessing import Preprocessing
 import matplotlib.pyplot as plt
@@ -24,7 +24,7 @@ def handle_windows(window_length, window=None, beta=None):
         if beta is None:
             raise ValueError("additional argument beta is empty!")
         else:
-            window_sequence = np.kaiser(window_length, beta)
+            window_sequence = windows.kaiser(window_length, beta)
     else:
         window_func = getattr(np, window)
         window_sequence = window_func(window_length)
@@ -42,7 +42,7 @@ def psd_array_btm(bud, offset, window_length, n_frame, n_hop, padding_ratio=0, w
     n_hop:              number of points skipped between each frame
     padding_ratio:      >= 1, ratio of the full frame length after zero padding to the window length
                         note that the final frame length will be rounded up to the next power of base 2
-    window:             to be chosen from ["bartlett", "blackman", "hamming", "hanning", "kaiser"]
+    window:             to be chosen from ["bartlett", "blackman", "hamming", "hanning", "kaiser", etc.] (from scipy.signal.windows)
                         if None, a rectangular window is implied
                         if "kaiser" is given, an additional argument of beta is expected
     '''
@@ -53,10 +53,11 @@ def psd_array_btm(bud, offset, window_length, n_frame, n_hop, padding_ratio=0, w
     # modify hop number
     if n_hop == 0: n_hop = window_length
     # build the frequency sequence
-    frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1)[:-1] # Hz
+    frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1) # Hz
     if n_point % 2 == 1: frequencies += bud.sampling_rate / (2*n_point)
     # build the time sequence
-    times = (offset + np.arange(n_frame+1) * n_hop) / bud.sampling_rate # s 
+    #times = (offset + np.arange(n_frame+1) * n_hop) / bud.sampling_rate # s 
+    times = offset / bud.sampling_rate + np.arange(n_frame+1) / bud.sampling_rate * n_hop # s 
     n_dof = 2    
     # load the data in the block-wise
     n_block = bud.n_buffer // window_length
@@ -88,6 +89,125 @@ def psd_array_btm(bud, offset, window_length, n_frame, n_hop, padding_ratio=0, w
         psd_array[index:] = np.fft.fftshift(np.absolute(fft_1(ifft(np.absolute(fft(signal))**2) * window_sequence))) / bud.sampling_rate
     return frequencies, times, psd_array, n_dof # Hz, s, V^2/Hz, 1
 
+def psd_array_welch_multiple_tdms_files(file_folder, file_strs, offset, window_length, n_average, overlap_ratio, padding_ratio=0, window=None, beta=None):
+    '''
+    Average Periodogram (Welch) Method Spectral Estimation for multiple .tdms files
+    
+    file_folder:        .tdms files' file folder
+    file_strs:          .tdms files list
+    offset:             number of IQ pairs to be skipped over from beginning
+    window_length:      length of the tapering window, a.k.a. L
+    n_average:          length of the average, len K
+    overlap_ratio:      the overlap ratio for the L-D points and if K sequences cover the entire N data points
+                        tot_N = ( L + D * ( K - 1 ) ) * n_frame
+                        overlap_ratio = 1 - D / L
+    padding_ratio:      >=1, ratio of the full frame length after zero padding to the window length
+                        note that the final frame length will be rounded up to the next power of base 2
+    window:             to be chosen from ["bartlett", "blackman", "hamming", "hanning", "kaiser", etc.] (from scipy.signal.windows)
+                        if None, a rectangular window is implied
+                        if "kaiser" is given, an additional argument of beta is expected
+    ***
+    https://ccrma.stanford.edu/~jos/sasp/Welch_s_Method_Windows.html#sec:wwelch
+    overlap_ratio should always match the window to reduce side-lobe level
+    rectangular window, overlap_ratio = 0, D = L
+    non-rectangular window, overlap_ratio >= 0.5 , D <= L / 2
+                Hamming, Hanning, and any other generalized Hamming window, overlap_ratio = 0.5
+                Blackman window, overlap_ratio = 2/3 , D = L / 3
+
+    '''
+    n_thread = multiprocessing.cpu_count()
+    window_sequence = handle_windows(window_length, window, beta)
+    # round the padded frame length up to the next radix-2 power
+    n_point = int( np.power(2, np.ceil(np.log2(window_length*padding_ratio))) ) if padding_ratio >= 1 else window_length
+    if window_length == int (window_length * overlap_ratio): overlap_ratio = 0.5
+    D = int((1 - overlap_ratio) * window_length) 
+    N = int(window_length + D * (n_average - 1))
+    total_frame, additional_x, _offset = 0, np.array([]), 0
+    # read for each files
+    file_strs = sorted(file_strs) # sort the files by name
+    # create an FFT plan
+    dummy = pyfftw.empty_aligned((n_average, window_length))
+    fft = pyfftw.builders.fft(dummy, n=n_point, overwrite_input=True, threads=n_thread)
+    sampling_rate, center_frequency = 0, 0
+    for i, file_str in enumerate(file_strs):
+        bud = Preprocessing(file_folder+file_str)
+        try:
+            if sampling_rate == 0:
+                sampling_rate = bud.sampling_rate
+                center_frequency = bud.center_frequency
+            elif bud.sampling_rate == sampling_rate and bud.center_frequency == center_frequency: # need to check if all the files sampling rate and center frequency are both the same
+                pass
+            else:
+                raise ValueError("sampling rate or center frequency in files is not the same!")
+        except Exception as e:
+            return
+        # crop the excessive frames for one file
+        n_frame = (bud.n_sample -  offset) // N
+        #print("n_frame: {:}, offset: {:}, N: {:}".format(n_frame, offset, N))
+        if n_frame>0: total_frame += n_frame
+        if i == 0:
+            if n_frame > 0:
+                for j in range(n_frame):
+                    if j == 0:
+                        x = bud.load(N, offset+j*N)[1]
+                        signal = np.lib.stride_tricks.as_strided(x, (n_average, window_length), (x.strides[0] * D, x.strides[0])) * window_sequence
+                        psd_array = np.mean(np.absolute(np.fft.fftshift(fft(signal), axes=-1))**2 / np.sum(window_sequence**2) / bud.sampling_rate, axis=0)
+                    else:
+                        x = bud.load(N, offset+j*N)[1]
+                        signal = np.lib.stride_tricks.as_strided(x, (n_average, window_length), (x.strides[0] * D, x.strides[0])) * window_sequence
+                        psd_array = np.vstack((psd_array, np.mean(np.absolute(np.fft.fftshift(fft(signal), axes=-1))**2 / np.sum(window_sequence**2) / bud.sampling_rate, axis=0)))
+                if n_frame * N < bud.n_sample - offset:
+                    _offset = bud.n_sample -  offset - n_frame * N
+                    additional_x = bud.load(_offset, offset + n_frame*N)[1]
+                    offset = N - _offset
+                else:
+                    additional_x = np.array([])
+                    offset = 0
+            else:
+                _offset = bud.n_sample - offset
+                additional_x = bud.load(_offset, offset)[1]
+                offset = N - _offset
+        else:
+            if n_frame > 0:
+                if offset != 0:
+                    total_frame += 1
+                    x = np.hstack((additional_x,bud.load(N - _offset,0)[1])) 
+                    signal = np.lib.stride_tricks.as_strided(x, (n_average, window_length), (x.strides[0] * D, x.strides[0])) * window_sequence
+                    psd_array = np.vstack((psd_array, np.mean(np.absolute(np.fft.fftshift(fft(signal), axes=-1))**2 / np.sum(window_sequence**2) / bud.sampling_rate, axis=0)))
+                for j in range(n_frame):
+                    x = bud.load(N, offset+j*N)[1]
+                    signal = np.lib.stride_tricks.as_strided(x, (n_average, window_length), (x.strides[0] * D, x.strides[0])) * window_sequence
+                    psd_array = np.vstack((psd_array, np.mean(np.absolute(np.fft.fftshift(fft(signal), axes=-1))**2 / np.sum(window_sequence**2) / bud.sampling_rate, axis=0)))
+                if n_frame * N < bud.n_sample - offset:
+                    _offset = bud.n_sample -  offset - n_frame * N
+                    additional_x = bud.load(_offset, offset + n_frame*N)[1]
+                    offset = N - _offset
+                else:
+                    additional_x = np.array([])
+                    offset = 0
+            elif (bud.n_sample - offset + len(additional_x) // N > 0):
+                total_frame += 1
+                x = np.hstack((additional_x,bud.load(N - _offset,0)[1])) 
+                signal = np.lib.stride_tricks.as_strided(x, (n_average, window_length), (x.strides[0] * D, x.strides[0])) * window_sequence
+                try:
+                    psd_array = np.vstack((psd_array, np.mean(np.absolute(np.fft.fftshift(fft(signal), axes=-1))**2 / np.sum(window_sequence**2) / bud.sampling_rate, axis=0)))
+                except:
+                    psd_array = np.mean(np.absolute(np.fft.fftshift(fft(signal), axes=-1))**2 / np.sum(window_sequence**2) / bud.sampling_rate, axis=0)
+            else:
+                _offset = bud.n_sample - offset
+                additional_x = np.hstack((additional_x,bud.load(N -  _offset,0)[1]))
+                offset = N - _offset
+                
+        # build the frequency sequence
+        frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1) # Hz
+        if n_point % 2 == 1: frequencies += bud.sampling_rate / (2*n_point)
+        # build the time sequence
+        times = offset / bud.sampling_rate + np.arange(total_frame+1) / bud.sampling_rate * N # s 
+        # number of freedom
+        n_dof = 2
+    return frequencies, times, psd_array, n_dof # Hz, s, V^2/Hz, 1
+
+
 def psd_array_welch(bud, offset, window_length, n_average, overlap_ratio, n_frame, n_hop, padding_ratio=0, window=None, beta=None):
     '''
     Average Periodogram (Welch) Method Spectral Estimation
@@ -103,7 +223,7 @@ def psd_array_welch(bud, offset, window_length, n_average, overlap_ratio, n_fram
     n_hop:              number of points skipped between each frame
     padding_ratio:      >= 1, ratio of the full frame length after zero padding to the window length
                         note that the final frame length will be rounded up to the next power of base 2
-    window:             to be chosen from ["bartlett", "blackman", "hamming", "hanning", "kaiser"]
+    window:             to be chosen from ["bartlett", "blackman", "hamming", "hanning", "kaiser", etc.] (from scipy.signal.windows)
                         if None, a rectangular window is implied
                         if "kaiser" is given, an additional argument of beta is expected
     ***
@@ -116,20 +236,21 @@ def psd_array_welch(bud, offset, window_length, n_average, overlap_ratio, n_fram
     '''
     n_thread = multiprocessing.cpu_count()
     window_sequence = handle_windows(window_length, window, beta)
-    # modify hop number
-    if n_hop == 0: n_hop = window_length
     # round the padded frame length up to the next radix-2 power
     n_point = int( np.power(2, np.ceil(np.log2(window_length*padding_ratio))) ) if padding_ratio >= 1 else window_length
-    # crop the excessive frames
-    if window_length * n_frame > bud.n_sample - offset or n_frame < 0: n_frame = (bud.n_sample - offset) // window_length
     if window_length == int (window_length * overlap_ratio): overlap_ratio = 0.5
     D = int((1 - overlap_ratio) * window_length) 
-    N = window_length + D * (n_average - 1)
+    N = int(window_length + D * (n_average - 1))
+    # modify hop number
+    if n_hop == 0: n_hop = N
+    # crop the excessive frames
+    if N * n_frame > bud.n_sample - offset or n_frame < 0: n_frame = (bud.n_sample - offset) // N
     # build the frequency sequence
-    frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1)[:-1] # Hz
+    frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1) # Hz
     if n_point % 2 == 1: frequencies += bud.sampling_rate / (2*n_point)
     # build the time sequence
-    times = (offset + np.arange(n_frame+1) * hop) / bud.sampling_rate # s 
+    #times = (offset + np.arange(n_frame+1) * n_hop) / bud.sampling_rate # s 
+    times = offset / bud.sampling_rate + np.arange(n_frame+1) / bud.sampling_rate * n_hop # s 
     # number of freedom
     n_dof = 2
     # create an FFT plan
@@ -137,7 +258,7 @@ def psd_array_welch(bud, offset, window_length, n_average, overlap_ratio, n_fram
     fft = pyfftw.builders.fft(dummy, n=n_point, overwrite_input=True, threads=n_thread)
     for i in range(n_frame):
         # set signal
-        x = bud.load(N, offset+i*hop)[1]
+        x = bud.load(N, offset+i*n_hop)[1]
         signal = np.lib.stride_tricks.as_strided(x, (n_average, window_length), (x.strides[0] * D, x.strides[0])) * window_sequence
         if i == 0:
             psd_array = np.mean(np.absolute(np.fft.fftshift(fft(signal), axes=-1))**2 / np.sum(window_sequence**2) / bud.sampling_rate, axis=0)
@@ -161,7 +282,7 @@ def psd_array_multitaper(bud, offset, window_length, n_frame, n_hop, padding_rat
     Kmax:               number of DPSS windows to return (order 0 through Kmax-1)
     '''
     n_thread = multiprocessing.cpu_count()
-    window_sequence = dpss(window_length, NW, Kmax, return_ratios=False)
+    window_sequence = windows.dpss(window_length, NW, Kmax, return_ratios=False)
     window_sequence = window_sequence.reshape(Kmax, 1, window_length)
     # modify hop number
     if n_hop == 0: n_hop = window_length
@@ -170,10 +291,11 @@ def psd_array_multitaper(bud, offset, window_length, n_frame, n_hop, padding_rat
     # crop the excessive frames
     if window_length * n_frame > bud.n_sample - offset or n_frame < 0: n_frame = (bud.n_sample - offset) // window_length
     # build the frequency sequence
-    frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1)[:-1] # Hz
+    frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1) # Hz
     if n_point % 2 == 1: frequencies += bud.sampling_rate / (2*n_point)
     # build the time sequence
-    times = (offset + np.arange(n_frame+1) * n_hop) / bud.sampling_rate # s 
+    #times = (offset + np.arange(n_frame+1) * n_hop) / bud.sampling_rate # s 
+    times = offset / bud.sampling_rate + np.arange(n_frame+1) / bud.sampling_rate * n_hop # s 
     # number of degrees of freedom
     n_dof = 2 * Kmax
     # load the data in the block-wise
@@ -217,7 +339,7 @@ def psd_array_adaptive_multitaper(bud, offset, window_length, n_frame, n_hop, pa
     Kmax:               number of DPSS windows to return (order 0 through Kmax-1)
     '''
     n_thread = multiprocessing.cpu_count()
-    window_sequence, ratio = dpss(window_length, NW, Kmax, return_ratios=True)
+    window_sequence, ratio = windows.dpss(window_length, NW, Kmax, return_ratios=True)
     window_sequence = window_sequence.reshape(Kmax, 1, window_length)
     ratio = ratio.reshape(Kmax, 1, 1)
     # modify hop number
@@ -227,10 +349,11 @@ def psd_array_adaptive_multitaper(bud, offset, window_length, n_frame, n_hop, pa
     # crop the excessive frames
     if window_length * n_frame > bud.n_sample - offset or n_frame < 0: n_frame = (bud.n_sample - offset) // window_length
     # build the frequency sequence
-    frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1)[:-1] # Hz
+    frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1) # Hz
     if n_point % 2 == 1: frequencies += bud.sampling_rate / (2*n_point)
     # build the time sequence
-    times = (offset + np.arange(n_frame+1) * n_hop) / bud.sampling_rate # s 
+    #times = (offset + np.arange(n_frame+1) * n_hop) / bud.sampling_rate # s 
+    times = offset / bud.sampling_rate + np.arange(n_frame+1) / bud.sampling_rate * n_hop # s 
     # load the data in the block-wise
     n_block = bud.n_buffer // window_length
     # placeholders for the transformed spectrogram and number of degrees of freedom
@@ -273,25 +396,3 @@ def psd_array_adaptive_multitaper(bud, offset, window_length, n_frame, n_hop, pa
             psd_array[index:] = psd_temp
         n_dof[index:] = 2 * np.sum(weight, axis=0)**2 / np.sum(weight**2, axis=0)
     return frequencies, times, psd_array, n_dof # Hz, s, V^2/Hz, 1
-
-
-
-file_folder = "I:/data/2018-12/"
-file_str = "20181228_065610.wvd"
-
-bud = Preprocessing(file_folder+file_str)
-#frequencies, times, psd_array, n_dof = psd_array_btm(bud, offset=5000, window_length=7500, n_frame=1000, n_hop=1, padding_ratio=0, window='kaiser', beta=4)
-#frequencies, times, psd_array, n_dof = psd_array_welch(bud, offset=5000, window_length=7500, n_average=10, overlap_ratio=0.5, n_frame=1000, n_hop=1, padding_ratio=0, window='kaiser', beta=4)
-#frequencies, times, psd_array, n_dof = psd_array_multitaper(bud, offset=5000, window_length=7500, n_frame=5000, n_hop=1, padding_ratio=0, NW=3, Kmax=4)
-frequencies, times, psd_array, n_dof = psd_array_adaptive_multitaper(bud, offset=int(3750e3*10), window_length=7500, n_frame=10000, n_hop=7500, padding_ratio=0, NW=3, Kmax=4)
-
-ind_00 = int(np.searchsorted(frequencies, 280e3, side='left'))
-ind_01 = int(np.searchsorted(frequencies, 400e3, side='left'))
-ind_10 = int(np.searchsorted(frequencies, -1340e3, side='left'))
-ind_11 = int(np.searchsorted(frequencies, -1220e3, side='left'))
-
-fig, ax = plt.subplots(2,1)
-pcm = ax[0].pcolormesh(times, frequencies[ind_00:ind_01+1], psd_array[:,ind_00:ind_01].T, norm=colors.LogNorm(vmin=psd_array.min(), vmax=psd_array.max()))
-pcm = ax[1].pcolormesh(times, frequencies[ind_10:ind_11+1], psd_array[:,ind_10:ind_11].T, norm=colors.LogNorm(vmin=psd_array.min(), vmax=psd_array.max()))
-cax = fig.colorbar(pcm, ax=ax)
-plt.show()
