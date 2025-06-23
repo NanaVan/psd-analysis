@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import xml.etree.ElementTree as ET
 from nptdms import TdmsFile
 from datetime import datetime, timedelta
-import json, sys, os.path
+import json, sys, os.path, re
 
 class Preprocessing(object):
     '''
@@ -31,10 +31,18 @@ class Preprocessing(object):
             self.file_format = "tiq"
             self.extract_tiq()
         elif self.fname[-4:].lower() == "tdms":
-            self.file_format = "tdms"
-            self.extract_tdms()
+            with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+                if ('niRF' in [group.name for group in tdms.groups()]):
+                    self.file_format = "ni_tdms"
+                    self.extract_ni_tdms()
+                elif ('RecordHeader' in [group.name for group in tdms.groups()]):
+                    self.file_format = "tdms"
+                    self.extract_tdms()
+                else:
+                    print("Error: illegal .tdms file format!\nPlease check your .tdms file first!")
+                    sys.exit()
         else:
-            print("Error: unrecognized file format!\nOnly 'wv' or 'tiq' file can be accepted.")
+            print("Error: unrecognized file format!\nOnly 'wv', 'tiq' or 'tdms' file can be accepted.")
             sys.exit()
         if verbose:
             self.display()
@@ -92,6 +100,28 @@ class Preprocessing(object):
             for chunk in tdms.data_chunks():
                 self.n_sample += len(chunk['RecordData']['I'])
 
+    def extract_ni_tdms(self):
+        '''
+        extract the metadata from the .tdms file from NI test
+        '''
+        with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+            _match = re.search(r'(\d{8})_(\d{2}-\d{2}-\d{2})', self.fname)
+            if _match:
+                date_str = _match.group(1)
+                time_str = _match.group(2)
+                datetime_str = "{:}-{:}-{:}".format(date_str[:4],date_str[4:6],date_str[6:]) + 'T' + time_str.replace('-', ':')
+            self.date_time = np.datetime64(datetime_str)
+            self.span = tdms['niRF']['niRF_iq'].properties['Sample Rate'] # Hz 
+            self.sampling_rate = tdms['niRF']['niRF_iq'].properties['Sample Rate'] # Hz
+            self.ref_level = tdms['niRF']['niRF_iq'].properties['Ref Level(dBm)'] # dBm
+            self.data_format = 'int14'
+            self.gain = tdms['niRF']['niRF_iq'].properties['IQ Gain']
+            self.center_frequency = tdms['niRF']['niRF_iq'].properties['Fc(Hz)'] # Hz
+            self.n_sample = 0
+            for chunk in tdms.data_chunks():
+                self.n_sample += len(chunk['niRF']['niRF_iq'])
+            self.n_sample = int(self.n_sample/2)
+
     def display(self):
         '''
         display all the parameters as a list
@@ -101,7 +131,7 @@ class Preprocessing(object):
         print("name of file\t\t\t" + self.fname)
         print("path to file\t\t\t" + self.fpath)
         print("timestamp in UTC \t\t" + str(self.date_time))
-        try: # wv, tiq
+        try: # wv, tiq, ni_tdms
             print("data format\t\t\t" + repr(self.data_format))
             print("reference level\t\t\t{:g} dBm".format(self.ref_level))
             print("center frequency\t\t{:g} MHz".format(self.center_frequency*1e-6))
@@ -147,17 +177,30 @@ class Preprocessing(object):
                     return 0, _total_size, _chunk[_offset:]
                 else:
                     return 0, 0, _chunk[_offset:_offset+_total_size]
-            with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
-                I_data, Q_data = [], []
-                I_offset, Q_offset, I_total_size, Q_total_size = offset, offset, size*decimating_factor, size*decimating_factor
-                for chunk in tdms.data_chunks():
-                    I_offset, I_total_size, _I_data = data_return(chunk['RecordData']['I'], I_offset, I_total_size)
-                    I_data.append(_I_data)
-                    Q_offset, Q_total_size, _Q_data = data_return(chunk['RecordData']['Q'], Q_offset, Q_total_size)
-                    Q_data.append(_Q_data)
-                    if I_total_size == 0 and Q_total_size == 0:
-                        data = (np.hstack(I_data)[::decimating_factor] + 1j * np.hstack(Q_data)[::decimating_factor]) * self.gain # V
-                        break
+            if self.file_format == 'tdms':
+                with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+                    I_data, Q_data = [], []
+                    I_offset, Q_offset, I_total_size, Q_total_size = offset, offset, size*decimating_factor, size*decimating_factor
+                    for chunk in tdms.data_chunks():
+                        I_offset, I_total_size, _I_data = data_return(chunk['RecordData']['I'], I_offset, I_total_size)
+                        I_data.append(_I_data)
+                        Q_offset, Q_total_size, _Q_data = data_return(chunk['RecordData']['Q'], Q_offset, Q_total_size)
+                        Q_data.append(_Q_data)
+                        if I_total_size == 0 and Q_total_size == 0:
+                            data = (np.hstack(I_data)[::decimating_factor] + 1j * np.hstack(Q_data)[::decimating_factor]) * self.gain # V
+                            break
+            elif self.file_format == 'ni_tdms':
+                with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+                    IQ_data = []
+                    IQ_offset, IQ_total_size = offset*2, 2*size*decimating_factor
+                    for chunk in tdms.data_chunks():
+                        IQ_offset, IQ_total_size, _IQ_data = data_return(chunk['niRF']['niRF_iq'], IQ_offset, IQ_total_size)
+                        IQ_data.append(_IQ_data)
+                        if IQ_total_size == 0:
+                            data = np.hstack(IQ_data).reshape(size,2*decimating_factor)[:,:2].flatten().astype(float).view(complex) * self.gain # V
+                            break
+            else:
+                pass
         if draw:
             self.draw(times, data)
         else:
