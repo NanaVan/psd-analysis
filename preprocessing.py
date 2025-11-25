@@ -100,7 +100,7 @@ class Preprocessing(object):
         def get_value(key):
             return next(root[0][0].iter(prefix + key)).text
         # since the analyzers are in the same timezone, we use the datetime in a simple way.
-        warnings.filterwarnings("ignore", message="no explict representation of timezones available for np.datetime64")
+        warnings.filterwarnings("ignore", message="no explicit representation of timezones available for np.datetime64")
         self.date_time = np.datetime64(get_value("DateTime"))
         self.data_format = np.dtype(get_value("NumberFormat").lower()).newbyteorder(get_value("Endian").lower())
         self.ref_level = float(get_value("ReferenceLevel")) # dBm
