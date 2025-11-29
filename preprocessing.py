@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from nptdms import TdmsFile
 from typing import List, Dict, Tuple
 from datetime import datetime, timedelta
-import json, sys, os.path, struct, warnings
+import json, sys, os.path, struct, warnings, re
 
 def read_sua_header128(header_data):
     '''
@@ -36,6 +36,21 @@ def read_sua_header128(header_data):
         header[f'ext_field_{i}'] = fields[14 + i]
     return header
 data_type_map = {3: np.int8, 5: np.int16, 6: np.int16} # 6: QI pairing, each for int16
+
+def extract_and_convert_time_from_dataFile(path):
+    '''
+    extract time info from .data file (puyuan device), transfer to the float with precision ns.
+    '''
+    parts = path.split('/')
+    time_str = next((s for s in parts if 'TestMode' in s), None)
+    if time_str:
+        time_str = time_str.split('TestMode_')[1]
+    else:
+        raise ValueError('Invalid time info can be extracted from the file folder for the puyuan .data file')
+    formatted_time_str = time_str.replace('-', ':', 2).replace('_', ' ', 1).replace('-', ':')
+    _dt = datetime.strptime(formatted_time_str, "%y:%m:%d %H:%M:%S")
+    np_dt64 = np.datetime64(_dt)
+    return float(np_dt64.astype('datetime64[ns]').astype(np.int64))
 
 
 class Preprocessing(object):
@@ -136,12 +151,17 @@ class Preprocessing(object):
             header_data = read_sua_header128(f.read(self.n_offset))
         self.packet_len = header_data['packet_len']
         self.data_format = data_type_map.get(header_data['data_type'])
-        self.date_time = ''
         self.n_sample = os.path.getsize('/'.join((self.fpath, self.fname))) // self.packet_len * ((self.packet_len - self.n_offset) // self.data_format().itemsize // 2) 
         self.sampling_rate = 31.25e6
         self.span = self.sampling_rate * 0.8
         self.gain = 1.0
         self.center_frequency = 243e6
+        try:
+            file_ind = int(re.match(r'ch2_(\d+)\.data', self.fname).group(1))
+            self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
+        except:
+            self.date_time = ''
+            raise ValueError("{:} is invalid for the data file".format(self.fname))
 
     def display(self):
         '''
