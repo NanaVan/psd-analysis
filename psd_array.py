@@ -2,7 +2,7 @@
 # -*- coding:utf-8 -*-
 
 import numpy as np
-import pyfftw, multiprocessing, os
+import pyfftw, multiprocessing, os, system
 from scipy.signal import windows
 
 from preprocessing import Preprocessing
@@ -89,9 +89,9 @@ def psd_array_btm(bud, offset, window_length, n_frame, n_hop, padding_ratio=0, w
         psd_array[index:] = np.fft.fftshift(np.absolute(fft_1(ifft(np.absolute(fft(signal))**2) * window_sequence))) / bud.sampling_rate
     return frequencies, times, psd_array, n_dof # Hz, s, V^2/Hz, 1
 
-def psd_array_welch_multiple_tdms_files(file_folder, file_strs, offset, window_length, n_average, overlap_ratio, padding_ratio=0, window=None, beta=None):
+def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length, n_average, overlap_ratio, padding_ratio=0, window=None, beta=None):
     '''
-    Average Periodogram (Welch) Method Spectral Estimation for multiple .tdms files
+    Average Periodogram (Welch) Method Spectral Estimation for multiple .tdms or .data files from NI or puyuan devices
     
     file_folder:        .tdms files' file folder
     file_strs:          .tdms files list
@@ -115,6 +115,26 @@ def psd_array_welch_multiple_tdms_files(file_folder, file_strs, offset, window_l
                 Blackman window, overlap_ratio = 2/3 , D = L / 3
 
     '''
+    if not file_strs:
+        print('No file in the assigned file list, please check and try again.')
+        return
+    first_extension = None
+    try:
+        for filename in file_strs:
+            full_path = os.path.join(file_folder, filename)
+            _, current_extension = os.path.splitext(full_path)
+            if first_extension is None:
+                first_extension = current_extension
+            else:
+                # check if all the suffixes are identical
+                if current_extension != first_extension:
+                    raise ValueError("Error: the suffix of the file '{:}' within the file list is not match!".format(filename))
+        if first_extension not in ['.tdms', '.data']:
+            raise ValueError("Error: All files in the list bear the suffix {:}, neither .tdms nor .data.".format(first_extension))
+    except ValueError as e:
+        print("The files in the list do not meet the requirements. {:}".format(e))
+        sys.exit(1)
+        
     n_thread = multiprocessing.cpu_count()
     window_sequence = handle_windows(window_length, window, beta)
     # round the padded frame length up to the next radix-2 power
