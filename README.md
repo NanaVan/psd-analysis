@@ -8,7 +8,7 @@ a toolkit for spectrum analysis
 
 ## Usage
 Class `Preprocessing` in `preprocessing.py` provides function for displaying the header of data file and extracting data.
-- `extract_[?]`: extract the information from the header of data file. `wv` for `.wvd` data file from R&S data recorder, `.tiq` data file from Tektronix spectrum analyzer, `.tdms` data file from NTCAP.
+- `extract_[?]`: extract the information from the header of data file. `wv` for `.wvd` data file from R&S data recorder, `.tiq` data file from Tektronix spectrum analyzer, `.tdms` data file from NTCAP or ruijiuchen@github's program, `.data` data file from puyuan's RIGOL device.
 - `display`: display the header information.
 - `load`: quick access the metadata.
 - `draw`: plot the IQ data from the metadata.
