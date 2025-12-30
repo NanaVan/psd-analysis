@@ -186,7 +186,7 @@ class Preprocessing(object):
         self.sampling_rate = 31.25e6
         self.span = self.sampling_rate * 0.8
         self.gain = 1.0
-        self.center_frequency = 243e6
+        self.center_frequency = 308e6
         try:
             file_ind = int(re.match(r'ch2_(\d+)\.data', self.fname).group(1))
             self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
@@ -248,7 +248,7 @@ class Preprocessing(object):
                 sua.seek(packet_start*self.packet_len)
                 data_buffer = np.frombuffer(sua.read(packet_count*self.packet_len), dtype=self.data_format)
             actual_packet_num = data_buffer.size // (self.packet_len // self.data_format().itemsize)
-            data = np.hstack(data_buffer.reshape(actual_packet_num, -1)[:, self.n_offset//self.data_format().itemsize:])[2*(offset-packet_start*packet_size_for_data):2*(size+offset-packet_start*packet_size_for_data)].reshape(size,2)[:,:2].flatten().astype(float).view(complex) * self.gain
+            data = np.hstack(data_buffer.reshape(actual_packet_num, -1)[:, self.n_offset//self.data_format().itemsize:])[2*(offset-packet_start*packet_size_for_data):2*(size+offset-packet_start*packet_size_for_data)].reshape(size,2)[:,:2].flatten().astype(float).view(complex).conj() * self.gain # QIQIQI structure
         else: # for tdms
             def data_return(_chunk, _offset, _total_size):
                 if _offset >= len(_chunk):
