@@ -9,13 +9,13 @@ from typing import List, Dict, Tuple
 from datetime import datetime, timedelta
 import json, sys, os.path, struct, warnings, re
 
-def read_sua_header128(header_data):
+def read_sua_header256(header_data):
     '''
-    read SUA format file with 128-byte header
+    read SUA format file with 256-byte header
     '''
-    if len(header_data) < 128:
-        raise ValueError("Header data must be at least 128 bytes")
-    fields = struct.unpack('<IIIBBHHHIBIBH32s16I', header_data[:128])
+    if len(header_data) < 256:
+        raise ValueError("Header data must be at least 256 bytes")
+    fields = struct.unpack('<IIIBBHHHIBIBH56I', header_data[:256])
     header = {
         'magic': fields[0],         # 0x01DCEF18
         'prt_count': fields[1],
@@ -30,10 +30,10 @@ def read_sua_header128(header_data):
         'total_len': fields[10],
         'reserved1': fields[11],
         'reserved2': fields[12],
-        'comment': fields[13].decode(errors='ignore').strip('\x00'),
+        #'comment': fields[13].decode(errors='ignore').strip('\x00'),
     }
-    for i in range(16):
-        header[f'ext_field_{i}'] = fields[14 + i]
+    for i in range(56):
+        header[f'ext_field_{i}'] = fields[13 + i]
     return header
 data_type_map = {3: np.int8, 5: np.int16, 6: np.int16} # 6: QI pairing, each for int16
 
@@ -177,9 +177,9 @@ class Preprocessing(object):
         '''
         extract the metadata from the .data file collected by puyuan device
         '''
-        self.n_offset = 128 
+        self.n_offset = 256 
         with open('/'.join((self.fpath, self.fname)), 'rb') as f:
-            header_data = read_sua_header128(f.read(self.n_offset))
+            header_data = read_sua_header256(f.read(self.n_offset))
         self.packet_len = header_data['packet_len']
         self.data_format = data_type_map.get(header_data['data_type'])
         self.n_sample = os.path.getsize('/'.join((self.fpath, self.fname))) // self.packet_len * ((self.packet_len - self.n_offset) // self.data_format().itemsize // 2) 
