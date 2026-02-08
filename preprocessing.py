@@ -9,31 +9,56 @@ from typing import List, Dict, Tuple
 from datetime import datetime, timedelta
 import json, sys, os.path, struct, warnings, re
 
-def read_sua_header256(header_data):
+def read_sua_header256(header_data, puyuan_new):
     '''
     read SUA format file with 256-byte header
     '''
     if len(header_data) < 256:
         raise ValueError("Header data must be at least 256 bytes")
-    fields = struct.unpack('<IIIBBHHHIBIBH56I', header_data[:256])
-    header = {
-        'magic': fields[0],         # 0x01DCEF18
-        'prt_count': fields[1],
-        'packet_len': fields[2],
-        'pack_info': fields[3],
-        'data_width': fields[4],
-        'interleave': fields[5],
-        'channel_count': fields[6],
-        'channel_id': fields[7],
-        'prt_width': fields[8],
-        'data_type': fields[9],
-        'total_len': fields[10],
-        'reserved1': fields[11],
-        'reserved2': fields[12],
-        #'comment': fields[13].decode(errors='ignore').strip('\x00'),
-    }
-    for i in range(56):
-        header[f'ext_field_{i}'] = fields[13 + i]
+    if puyuan_new:
+        fields = struct.unpack('<IIIBBHHHIBIBH8IBBBBBHQQB42I', header_data[:256])
+        header = {
+            'magic': fields[0],         # 0x01DCEF18
+            'prt_count': fields[1],
+            'packet_len': fields[2],
+            'pack_info': fields[3],
+            'data_width': fields[4],
+            'interleave': fields[5],
+            'channel_count': fields[6],
+            'channel_id': fields[7],
+            'prt_width': fields[8],
+            'data_type': fields[9],
+            'total_len': fields[10],
+            'reserved1': fields[11],
+            'reserved2': fields[12],
+            'center_frequency': fields[13], # [MHz]
+            'span': fields[14], # [kHz]
+            'sampling_rate': fields[15], # [kHz]
+            'date_time': '{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}'.format(fields[26], fields[25], fields[24], fields[23], fields[22], fields[21]),
+            'syn_count': fields[27],
+            'trigger_count': fields[28],
+            'trigger_sign': fields[29],
+        }
+    else:
+        fields = struct.unpack('<IIIBBHHHIBIBH56I', header_data[:256])
+        header = {
+            'magic': fields[0],         # 0x01DCEF18
+            'prt_count': fields[1],
+            'packet_len': fields[2],
+            'pack_info': fields[3],
+            'data_width': fields[4],
+            'interleave': fields[5],
+            'channel_count': fields[6],
+            'channel_id': fields[7],
+            'prt_width': fields[8],
+            'data_type': fields[9],
+            'total_len': fields[10],
+            'reserved1': fields[11],
+            'reserved2': fields[12],
+            #'comment': fields[13].decode(errors='ignore').strip('\x00'),
+        }
+        for i in range(56):
+            header[f'ext_field_{i}'] = fields[13 + i]
     return header
 data_type_map = {3: np.int8, 5: np.int16, 6: np.int16} # 6: QI pairing, each for int16
 
@@ -62,9 +87,12 @@ class Preprocessing(object):
 
     n_buffer = 10**5 # maximum number of IQ pairs to be loaded at one time
 
-    def __init__(self, file_str, verbose=True):
+    def __init__(self, file_str, puyuan_new=False, verbose=True):
         '''
         file_str is a string describing the location of the .wvh file or .wvd file
+        puyuan_new:     only required for puyuan device, 
+                        default, False for the 2-channel sample device 
+                        True for the 4-channel new device 
         '''
         file_abs = os.path.abspath(file_str)
         self.fname = os.path.basename(file_abs)
@@ -88,7 +116,7 @@ class Preprocessing(object):
                     sys.exit()
         elif self.fname[-4:].lower() == "data":
             self.file_format = "data"
-            self.extract_data()
+            self.extract_data(puyuan_new)
         else:
             print("Error: unrecognized file format!\nOnly 'wv' (from R&S devices) or 'tiq' (from Tek devices) or 'tdms' (from NI devices) or 'data' (from puyuan devices) file can be accepted.")
             sys.exit()
@@ -173,26 +201,37 @@ class Preprocessing(object):
             self.n_sample = int(self.n_sample/2)
 
 
-    def extract_data(self):
+    def extract_data(self, puyuan_new):
         '''
         extract the metadata from the .data file collected by puyuan device
         '''
         self.n_offset = 256 
         with open('/'.join((self.fpath, self.fname)), 'rb') as f:
-            header_data = read_sua_header256(f.read(self.n_offset))
+            header_data = read_sua_header256(f.read(self.n_offset), puyuan_new)
         self.packet_len = header_data['packet_len']
         self.data_format = data_type_map.get(header_data['data_type'])
         self.n_sample = os.path.getsize('/'.join((self.fpath, self.fname))) // self.packet_len * ((self.packet_len - self.n_offset) // self.data_format().itemsize // 2) 
-        self.sampling_rate = 31.25e6
-        self.span = self.sampling_rate * 0.8
-        self.gain = 1.0
-        self.center_frequency = 308e6
-        try:
-            file_ind = int(re.match(r'ch2_(\d+)\.data', self.fname).group(1))
-            self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
-        except:
-            self.date_time = ''
-            raise ValueError("{:} is invalid for the data file".format(self.fname))
+        if puyuan_new:
+            self.sampling_rate = header_data['sampling_rate'] * 1e3
+            self.span = header_data['span'] * 1e3
+            self.gain = 1.0
+            self.center_frequency = header_data['center_frequency'] * 1e6
+            try:
+                self.date_time = np.datetime64(header_data['date_time'])
+            except:
+                file_ind = int(re.match(r'ch\d+_(\d+)\.data', self.fname).group(1))
+                self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
+        else:
+            self.sampling_rate = 31.25e6
+            self.span = self.sampling_rate * 0.8
+            self.gain = 1.0
+            self.center_frequency = 308e6
+            try:
+                file_ind = int(re.match(r'ch\d+_(\d+)\.data', self.fname).group(1))
+                self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
+            except:
+                self.date_time = ''
+                raise ValueError("{:} is invalid for the data file".format(self.fname))
 
     def display(self):
         '''
