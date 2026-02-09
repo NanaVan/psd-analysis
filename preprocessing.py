@@ -67,11 +67,18 @@ def extract_and_convert_time_from_dataFile(path):
     extract time info from .data file (puyuan device), transfer to the float with precision ns.
     '''
     parts = path.split('/')
-    time_str = next((s for s in parts if re.search(r'TestModePY8[24]', s)), None)
-    if time_str:
-        time_str = re.split(r'TestModePY8[24]_', time_str)[-1]
-    else:
-        raise ValueError('Invalid time info can be extracted from the file folder for the puyuan .data file')
+    try:
+        time_str = next((s for s in parts if re.search(r'TestModePY8[24]', s)), None)
+        if time_str:
+            time_str = re.split(r'TestModePY8[24]_', time_str)[-1]
+        else:
+            raise ValueError('Invalid time info can be extracted from the file folder for the puyuan .data file')
+    except:
+        time_str = next((s for s in parts if 'TestMode' in s), None)
+        if time_str:
+            time_str = time_str.split('TestMode_')[1]
+        else:
+            raise ValueError('Invalid time info can be extracted from the file folder for the puyuan .data file')
     formatted_time_str = time_str.replace('-', ':', 2).replace('_', ' ', 1).replace('-', ':')
     _dt = datetime.strptime(formatted_time_str, "%y:%m:%d %H:%M:%S")
     np_dt64 = np.datetime64(_dt)
