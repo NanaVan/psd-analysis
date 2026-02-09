@@ -67,9 +67,9 @@ def extract_and_convert_time_from_dataFile(path):
     extract time info from .data file (puyuan device), transfer to the float with precision ns.
     '''
     parts = path.split('/')
-    time_str = next((s for s in parts if 'TestMode' in s), None)
+    time_str = next((s for s in parts if re.search(r'TestModePY8[24]', s)), None)
     if time_str:
-        time_str = time_str.split('TestMode_')[1]
+        time_str = re.split(r'TestModePY8[24]_', time_str)[-1]
     else:
         raise ValueError('Invalid time info can be extracted from the file folder for the puyuan .data file')
     formatted_time_str = time_str.replace('-', ':', 2).replace('_', ' ', 1).replace('-', ':')
@@ -219,7 +219,7 @@ class Preprocessing(object):
             try:
                 self.date_time = np.datetime64(header_data['date_time'])
             except:
-                file_ind = int(re.match(r'ch\d+_(\d+)\.data', self.fname).group(1))
+                file_ind = int(re.search(r'_(\d+)\.data', self.fname).group(1))
                 self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
         else:
             self.sampling_rate = 31.25e6
@@ -227,7 +227,7 @@ class Preprocessing(object):
             self.gain = 1.0
             self.center_frequency = 308e6
             try:
-                file_ind = int(re.match(r'ch\d+_(\d+)\.data', self.fname).group(1))
+                file_ind = int(re.search(r'_(\d+)\.data', self.fname).group(1))
                 self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
             except:
                 self.date_time = ''
