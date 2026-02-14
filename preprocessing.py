@@ -9,6 +9,10 @@ from typing import List, Dict, Tuple
 from datetime import datetime, timedelta
 import json, sys, os.path, struct, warnings, re
 
+def bcd_to_int(bcd_byte):
+    '''transfer HEX directly to base-10, e.g. 0x46 -> 46'''
+    return (bcd_byte >> 4) * 10 + (bcd_byte & 0x0F)
+
 def read_sua_header256(header_data, puyuan_new):
     '''
     read SUA format file with 256-byte header
@@ -32,12 +36,10 @@ def read_sua_header256(header_data, puyuan_new):
         header['center_frequency'] = struct.unpack('<I', header_data[32:36])[0] # [MHz]
         header['span'] = struct.unpack('<I', header_data[36:40])[0] # [kHz]
         header['sampling_rate'] = struct.unpack('<I', header_data[40:44])[0] # [kHz]
-        t_sec, t_min, t_hour, t_day, t_month, t_year = struct.unpack('<BBBBBH', header_data[64:71])
-        header['date_time'] = '{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}'.format(t_year, t_month, t_day, t_hour, t_min, t_sec)
+        header['date_time'] = '{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}'.format(bcd_to_int(header_data[70])*100+bcd_to_int(header_data[69]), bcd_to_int(header_data[68]), bcd_to_int(header_data[67]), bcd_to_int(header_data[66]), bcd_to_int(header_data[65]), bcd_to_int(header_data[64]))
         header['syn_count'] = struct.unpack('<Q', header_data[71:79])[0]
-        trigger_raw = struct.unpack('<Q', header_data[79:87])[0]
-        header['trigger_sign'] = int(trigger_raw & 0x1)
-        header['trigger_count'] = int(trigger_raw >> 1)
+        header['trigger_sign'] = header_data[79] & 0x1
+        header['trigger_count'] = struct.unpack('<Q', header_data[79:87])[0] >> 1
     else:
         for i in range(56):
             header[f'ext_field_{i}'] = struct.unpack('<I', header_data[32+4*i:36+4*i])[0]
@@ -76,12 +78,15 @@ class Preprocessing(object):
 
     n_buffer = 10**5 # maximum number of IQ pairs to be loaded at one time
 
-    def __init__(self, file_str, puyuan_new=False, verbose=True):
+    def __init__(self, file_str, puyuan_new=False, abs_trigger=True, verbose=True):
         '''
         file_str is a string describing the location of the .wvh file or .wvd file
         puyuan_new:     only required for puyuan device, 
                         default, False for the 2-channel sample device 
                         True for the 4-channel new device 
+        abs_trigger:    only required for new puyuan device,
+                        default, True return absolute UTC timestamp (ext from file, not from folder) list of triggers, e.g. ["2026-01-02T00:00:50.00000", "2026-01-02T00:01:00.00000", ...] for 0.1 Hz trigger
+                        False return packet count list of triggers, e.g. [1, 50, 99, ...]
         '''
         file_abs = os.path.abspath(file_str)
         self.fname = os.path.basename(file_abs)
@@ -105,12 +110,12 @@ class Preprocessing(object):
                     sys.exit()
         elif self.fname[-4:].lower() == "data":
             self.file_format = "data"
-            self.extract_data(puyuan_new)
+            self.extract_data(puyuan_new, abs_trigger)
         else:
             print("Error: unrecognized file format!\nOnly 'wv' (from R&S devices) or 'tiq' (from Tek devices) or 'tdms' (from NI devices) or 'data' (from puyuan devices) file can be accepted.")
             sys.exit()
         if verbose:
-            self.display()
+            self.display(puyuan_new)
 
     def extract_wv(self):
         '''
@@ -190,7 +195,7 @@ class Preprocessing(object):
             self.n_sample = int(self.n_sample/2)
 
 
-    def extract_data(self, puyuan_new):
+    def extract_data(self, puyuan_new, abs_trigger):
         '''
         extract the metadata from the .data file collected by puyuan device
         '''
@@ -199,32 +204,32 @@ class Preprocessing(object):
             header_data = read_sua_header256(f.read(self.n_offset), puyuan_new)
         self.packet_len = header_data['packet_len']
         self.data_format = data_type_map.get(header_data['data_type'])
-        packet_number = os.path.getsize('/'.join((self.fpath, self.fname))) // self.packet_len
-        self.n_sample = packet_number * ((self.packet_len - self.n_offset) // self.data_format().itemsize // 2) 
+        self.packet_number = os.path.getsize('/'.join((self.fpath, self.fname))) // self.packet_len
+        self.data_len = (self.packet_len - self.n_offset) // self.data_format().itemsize // 2
+        self.n_sample = self.packet_number * self.data_len
         if puyuan_new:
             self.sampling_rate = header_data['sampling_rate'] * 1e3
             self.span = header_data['span'] * 1e3
             self.gain = 1.0
             self.center_frequency = header_data['center_frequency'] * 1e6
-            try:
-                self.date_time = np.datetime64(header_data['date_time'])
-            except:
-                file_ind = int(re.search(r'_(\d+)\.data', self.fname).group(1))
-                self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
+            self.date_time = np.datetime64(header_data['date_time'])
+            file_ind = int(re.search(r'_(\d+)\.data', self.fname).group(1))
+            self.date_time_from_folder = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
             # extract trigger signal
             self.trigger_timestamp = []
             last_count = -1
             with open('/'.join((self.fpath, self.fname)), 'rb') as f:
-                for i in range(packet_number):
+                for i in range(self.packet_number):
                     f.seek(i * self.packet_len, os.SEEK_SET)
                     header_data = read_sua_header256(f.read(self.n_offset), puyuan_new)
                     current_count = header_data.get('trigger_count', 0)
                     if last_count != -1 and current_count > last_count:
-                        _time_delta = int((i + 0.5) * ((self.packet_len - self.n_offset) // self.data_format().itemsize) // 2 / self.sampling_rate * 1e9)  # ns
-                        self.trigger_timestamp.append(self.date_time + np.timedelta64(_time_delta, 'ns')) # setting the timestamp to the middle of the triggered packet
+                        if abs_trigger:
+                            _time_delta = int((i + 0.5) * self.data_len / self.sampling_rate * 1e9)  # ns
+                            self.trigger_timestamp.append(self.date_time + np.timedelta64(_time_delta, 'ns')) # setting the timestamp to the middle of the triggered packet
+                        else:
+                            self.trigger_timestamp.append(i)
                     last_count = current_count
-            print('trigger number: {:}/{:}'.format(len(self.trigger_timestamp), packet_number))
-            print('trigger time: {:}'.format(self.trigger_timestamp))
         else:
             self.sampling_rate = 31.25e6
             self.span = self.sampling_rate * 0.8
@@ -237,35 +242,43 @@ class Preprocessing(object):
                 self.date_time = ''
                 raise ValueError("{:} is invalid for the data file".format(self.fname))
 
-    def display(self):
+    def display(self, puyuan_new):
         '''
         display all the parameters as a list
         '''
         print("list of information:\n--------------------")
-        print("file format\t\t\t" + self.file_format)
-        print("name of file\t\t\t" + self.fname)
-        print("path to file\t\t\t" + self.fpath)
-        print("timestamp in UTC \t\t" + str(self.date_time))
+        print("file format\t\t\t\t" + self.file_format)
+        print("name of file\t\t\t\t" + self.fname)
+        print("path to file\t\t\t\t" + self.fpath)
+        if puyuan_new:
+            print("timestamp in UTC (ext from file)\t" + str(self.date_time))
+            print("timestamp in UTC (ext from folder)\t" + str(self.date_time_from_folder))
+        else:
+            print("timestamp in UTC \t\t\t" + str(self.date_time))
         try: # wv, tiq
-            print("data format\t\t\t" + repr(self.data_format))
-            print("reference level\t\t\t{:g} dBm".format(self.ref_level))
-            print("center frequency\t\t{:g} MHz".format(self.center_frequency*1e-6))
+            print("data format\t\t\t\t" + repr(self.data_format))
+            print("reference level\t\t\t\t{:g} dBm".format(self.ref_level))
+            print("center frequency\t\t\t{:g} MHz".format(self.center_frequency*1e-6))
         except AttributeError: 
             pass
-        print("span\t\t\t\t{:g} kHz".format(self.span*1e-3))
-        print("sampling rate\t\t\t{:g} kHz".format(self.sampling_rate*1e-3))
-        print("number of samples\t\t{:d} IQ pairs".format(self.n_sample))
-        print("recording duration (actual)\t{:g} s".format(self.n_sample/self.sampling_rate))
+        print("span\t\t\t\t\t{:g} kHz".format(self.span*1e-3))
+        print("sampling rate\t\t\t\t{:g} kHz".format(self.sampling_rate*1e-3))
+        print("number of samples\t\t\t{:d} IQ pairs".format(self.n_sample))
+        print("recording duration (actual)\t\t{:g} s".format(self.n_sample/self.sampling_rate))
+        if puyuan_new:
+            print("number of samples per packet\t\t{:d} IQ pairs".format(self.data_len))
+            print("number of packets in file\t\t{:d}".format(self.packet_number))
+            print("number of triggers in file\t\t{:d}".format(len(self.trigger_timestamp)))
         print("--------------------")
         try: # for wv
-            print("digitizing depth\t\t{:d} bits".format(self.digitizing_depth))
-            print("recording duration (set)\t{:g} s".format(self.duration))
+            print("digitizing depth\t\t\t{:d} bits".format(self.digitizing_depth))
+            print("recording duration (set)\t\t{:g} s".format(self.duration))
         except AttributeError: 
             try: # for tiq
-                print("scaling\t\t\t\t{:g}".format(self.scaling))
-                print("trigger position\t\t{:g} s".format(self.trig_pos))
+                print("scaling\t\t\t\t\t{:g}".format(self.scaling))
+                print("trigger position\t\t\t{:g} s".format(self.trig_pos))
             except AttributeError: # for tdms
-                print("gain\t\t\t\t{:.5e}".format(self.gain))
+                print("gain\t\t\t\t\t{:.5e}".format(self.gain))
         print("--------------------")
 
     def load(self, size, offset, decimating_factor=1, draw=False):
