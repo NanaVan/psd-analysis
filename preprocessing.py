@@ -15,50 +15,32 @@ def read_sua_header256(header_data, puyuan_new):
     '''
     if len(header_data) < 256:
         raise ValueError("Header data must be at least 256 bytes")
+    header = {
+        'magic':        struct.unpack('<I', header_data[0:4])[0],   #0x01DCEF18
+        'prt_count':    struct.unpack('<I', header_data[4:8])[0],
+        'packet_len':   struct.unpack('<I', header_data[8:12])[0],
+        'pack_info':    header_data[12],
+        'data_width':   header_data[13],
+        'interleave':   struct.unpack('<H', header_data[14:16])[0],
+        'channel_count':struct.unpack('<H', header_data[16:18])[0],
+        'channel_id':   struct.unpack('<H', header_data[18:20])[0],
+        'prt_width':    struct.unpack('<I', header_data[20:24])[0],
+        'data_type':    header_data[24],
+        'total_len':    struct.unpack('<I', header_data[25:29])[0],
+    }
     if puyuan_new:
-        fields = struct.unpack('<IIIBBHHHIBIBH8IBBBBBHQQB42I', header_data[:256])
-        header = {
-            'magic': fields[0],         # 0x01DCEF18
-            'prt_count': fields[1],
-            'packet_len': fields[2],
-            'pack_info': fields[3],
-            'data_width': fields[4],
-            'interleave': fields[5],
-            'channel_count': fields[6],
-            'channel_id': fields[7],
-            'prt_width': fields[8],
-            'data_type': fields[9],
-            'total_len': fields[10],
-            'reserved1': fields[11],
-            'reserved2': fields[12],
-            'center_frequency': fields[13], # [MHz]
-            'span': fields[14], # [kHz]
-            'sampling_rate': fields[15], # [kHz]
-            'date_time': '{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}'.format(fields[26], fields[25], fields[24], fields[23], fields[22], fields[21]),
-            'syn_count': fields[27],
-            'trigger_count': fields[28],
-            'trigger_sign': fields[29],
-        }
+        header['center_frequency'] = struct.unpack('<I', header_data[32:36])[0] # [MHz]
+        header['span'] = struct.unpack('<I', header_data[36:40])[0] # [kHz]
+        header['sampling_rate'] = struct.unpack('<I', header_data[40:44])[0] # [kHz]
+        t_sec, t_min, t_hour, t_day, t_month, t_year = struct.unpack('<BBBBBH', header_data[64:71])
+        header['date_time' = '{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}'.format(t_year, t_month, t_day, t_hour, t_min, t_sec)
+        header['syn_count'] = struct.unpack('<Q', header_data[71:79])[0]
+        trigger_raw = struct.unpack('<Q', header_data[79:87])[0]
+        header['trigger_sign'] = int(trigger_raw & 0x1)
+        header['trigger_count'] = int(trigger_count >> 1)
     else:
-        fields = struct.unpack('<IIIBBHHHIBIBH56I', header_data[:256])
-        header = {
-            'magic': fields[0],         # 0x01DCEF18
-            'prt_count': fields[1],
-            'packet_len': fields[2],
-            'pack_info': fields[3],
-            'data_width': fields[4],
-            'interleave': fields[5],
-            'channel_count': fields[6],
-            'channel_id': fields[7],
-            'prt_width': fields[8],
-            'data_type': fields[9],
-            'total_len': fields[10],
-            'reserved1': fields[11],
-            'reserved2': fields[12],
-            #'comment': fields[13].decode(errors='ignore').strip('\x00'),
-        }
         for i in range(56):
-            header[f'ext_field_{i}'] = fields[13 + i]
+        header[f'ext_field_{i}'] = struct.unpack('<I', header_data[32+4*i:36+4*i])[0]
     return header
 data_type_map = {3: np.int8, 5: np.int16, 6: np.int16} # 6: QI pairing, each for int16
 
@@ -217,7 +199,8 @@ class Preprocessing(object):
             header_data = read_sua_header256(f.read(self.n_offset), puyuan_new)
         self.packet_len = header_data['packet_len']
         self.data_format = data_type_map.get(header_data['data_type'])
-        self.n_sample = os.path.getsize('/'.join((self.fpath, self.fname))) // self.packet_len * ((self.packet_len - self.n_offset) // self.data_format().itemsize // 2) 
+        packet_number = os.path.getsize('/'.join((self.fpath, self.fname))) // self.packet_len
+        self.n_sample = packet_number * ((self.packet_len - self.n_offset) // self.data_format().itemsize // 2) 
         if puyuan_new:
             self.sampling_rate = header_data['sampling_rate'] * 1e3
             self.span = header_data['span'] * 1e3
@@ -228,6 +211,20 @@ class Preprocessing(object):
             except:
                 file_ind = int(re.search(r'_(\d+)\.data', self.fname).group(1))
                 self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
+            # extract trigger signal
+            self.trigger_timestamp = []
+            last_count = -1
+            with open('/'.join((self.fpath, self.fname)), 'rb') as f:
+                for i in range(packet_number):
+                    f.seek(i * self.packet_len, os.SEEK_SET)
+                    header_data = read_sua_header256(f.read(self.n_offset), puyuan_new)
+                    current_count = header_data.get('trigger_count', 0)
+                    if last_count != -1 and current_count > last_count:
+                        _time_delta = int((i + 0.5) * ((self.packet_len - self.n_offset) // self.data_format().itemsize) // 2 / self.sampling_rate * 1e9)  # ns
+                        self.trigger_timestamp.append(self.date_time + np.timedelta64(_time_delta, 'ns')) # setting the timestamp to the middle of the triggered packet
+                    last_count = current_count
+            print('trigger number: {:}/{:}'.format(len(self.trigger_timestamp), packet_number))
+            print('trigger time: {:}'.format(self.trigger_timestamp))
         else:
             self.sampling_rate = 31.25e6
             self.span = self.sampling_rate * 0.8
