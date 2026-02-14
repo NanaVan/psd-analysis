@@ -33,14 +33,14 @@ def read_sua_header256(header_data, puyuan_new):
         header['span'] = struct.unpack('<I', header_data[36:40])[0] # [kHz]
         header['sampling_rate'] = struct.unpack('<I', header_data[40:44])[0] # [kHz]
         t_sec, t_min, t_hour, t_day, t_month, t_year = struct.unpack('<BBBBBH', header_data[64:71])
-        header['date_time' = '{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}'.format(t_year, t_month, t_day, t_hour, t_min, t_sec)
+        header['date_time'] = '{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}'.format(t_year, t_month, t_day, t_hour, t_min, t_sec)
         header['syn_count'] = struct.unpack('<Q', header_data[71:79])[0]
         trigger_raw = struct.unpack('<Q', header_data[79:87])[0]
         header['trigger_sign'] = int(trigger_raw & 0x1)
-        header['trigger_count'] = int(trigger_count >> 1)
+        header['trigger_count'] = int(trigger_raw >> 1)
     else:
         for i in range(56):
-        header[f'ext_field_{i}'] = struct.unpack('<I', header_data[32+4*i:36+4*i])[0]
+            header[f'ext_field_{i}'] = struct.unpack('<I', header_data[32+4*i:36+4*i])[0]
     return header
 data_type_map = {3: np.int8, 5: np.int16, 6: np.int16} # 6: QI pairing, each for int16
 
