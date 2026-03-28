@@ -92,7 +92,7 @@ def psd_array_btm(bud, offset, window_length, n_frame, n_hop, padding_ratio=0, w
         psd_array[index:] = np.fft.fftshift(np.absolute(fft_1(ifft(np.absolute(fft(signal))**2) * window_sequence))) / bud.sampling_rate
     return frequencies, times, psd_array, n_dof # Hz, s, V^2/Hz, 1
 
-def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length, n_average, overlap_ratio, n_hop=None, padding_ratio=0, window=None, beta=None):
+def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length, n_average, overlap_ratio, puyuan_new=True, n_hop=None, padding_ratio=0, window=None, beta=None):
     '''
     Average Periodogram (Welch) Method Spectral Estimation for multiple .tdms or .data files from NI or puyuan devices
     
@@ -159,7 +159,7 @@ def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length
     fft = pyfftw.builders.fft(dummy, n=n_point, overwrite_input=True, threads=n_thread)
     sampling_rate, center_frequency = 0, 0
     for i, file_str in enumerate(file_strs):
-        bud = Preprocessing(file_folder+file_str)
+        bud = Preprocessing(file_folder+file_str, puyuan_new=puyuan_new)
         try:
             if sampling_rate == 0:
                 sampling_rate = bud.sampling_rate
