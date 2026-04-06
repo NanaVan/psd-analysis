@@ -2,7 +2,7 @@
 # -*- coding:utf-8 -*-
 
 import numpy as np
-import pyfftw, multiprocessing, os, sys
+import pyfftw, multiprocessing, os, sys, re
 from scipy.signal import windows
 
 from preprocessing import Preprocessing
@@ -96,8 +96,8 @@ def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length
     '''
     Average Periodogram (Welch) Method Spectral Estimation for multiple .tdms or .data files from NI or puyuan devices
     
-    file_folder:        .tdms files' file folder
-    file_strs:          .tdms files list
+    file_folder:        .tdms/.data files' file folder
+    file_strs:          .tdms/.data files list
     offset:             number of IQ pairs to be skipped over from beginning
     window_length:      length of the tapering window, a.k.a. L
     n_average:          length of the average, len K
@@ -153,7 +153,10 @@ def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length
     if n_hop == 0 or n_hop == None: n_hop = N
     total_frame, additional_x, lastData_remain = 0, np.array([]), 0
     # read for each files
-    file_strs = sorted(file_strs) # sort the files by name
+    if first_extension == '.data':
+        file_strs = sorted(file_strs, key=lambda x: int(x.split('_')[1].split('.')[0])) # sort the files by name
+    else:
+        file_strs = sorted(file_strs)
     # create an FFT plan
     dummy = pyfftw.empty_aligned((n_average, window_length))
     fft = pyfftw.builders.fft(dummy, n=n_point, overwrite_input=True, threads=n_thread)
