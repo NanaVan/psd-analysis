@@ -25,6 +25,10 @@ Functions in `psd_array.py` are used for the spectrum analysis (3-D). Return fre
 - `psd_array_welch`: Average Periodogram (Welch) Method Spectral Estimation
 - `psd_array_multitaper`: Multitaper Method (MTM)
 - `psd_array_adaptive_multitaper`: Adaptive Multitaper Method (AMTM)
+- `psd_array_welch_multiple_files`: Average Periodogram (Welch) Method Extension Tool, only used for continuous DAQ data
+
+Functions in `psd_cut.py` are used for cutting the data based on injection.
+- `psd_cutInjection`: cutting the continuous uninterruptted data into each injection from RIGOL DAQ device, and saving as the spectrogram data
 
 ## Example
 ```Python

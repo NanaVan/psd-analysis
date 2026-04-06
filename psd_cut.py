@@ -141,5 +141,3 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
                     lastTriggerData_remain = len(additional_x)
                     offset = 0
                     break
-
-psd_cutInjection(file_folder='C:/Users/van4w/Desktop/127La/8241_TestModePY82_26-04-06_04-39-42/', file_strs=['PY82ch1_11.data', 'PY82ch1_12.data'], output_folder='C:/Users/van4w/Desktop/127La/8241_result/', window_length=262144, n_average=4, overlap_ratio=0, n_hop=None, window='kaiser', beta=14)
