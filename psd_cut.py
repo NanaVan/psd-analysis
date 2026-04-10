@@ -76,7 +76,7 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
     additional_x, lastTriggerData_remain, trigger_frame, offset = np.array([]), 0, 0, 0
     for i, file_str in enumerate(file_strs):
         bud = Preprocessing(file_folder+file_str, puyuan_new=True, abs_trigger=False)
-        
+        ThisFileTimestamp = bud.date_time + np.timedelta64(8, 'h') # convert to '+08' timezone
         if len(bud.trigger_timestamp) == 0:
             print('Warning: no trigger in file {:}, skip it. Continue until another file with more than 1 trigger.'.format(file_st))
             additional_x, lastTriggerData_remain, trigger_frame, offset = np.array([]), 0, 0, 0
@@ -86,6 +86,7 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
                 ThisTriggerData_remain = trigger_timestamp * bud.data_len + lastTriggerData_remain - offset
                 if trigger_i == 0 and trigger_frame == 0: 
                     offset = trigger_timestamp * bud.data_len
+                    ThisDataTimestamp = ThisFileTimestamp + np.timedelta64(int(offset/bud.sampling_rate), 's')
                     continue
                 while True:
                     if ThisTriggerData_remain > N:
@@ -111,16 +112,19 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
                     else:
                         frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1) # Hz
                         if n_point % 2 == 1: frequencies += bud.sampling_rate / (2*n_point)
+                        freq_idx_0, freq_idx_1 = np.searchsorted(frequencies, [-bud.span/2, bud.span/2])
+                        frequencies = frequencies[freq_idx_0:freq_idx_1+1]
                         times = np.arange(trigger_frame+1) / bud.sampling_rate * n_hop # s
                         if trigger_i == 0:
                             print('Injection between {:} and {:}'.format(file_strs[i-1], file_str))
-                            np.savez(output_folder+'cutInjection_'+file_strs[i-1][:-5]+'-'+file_str.split('_')[1].split('.')[0]+'.npz', frequencies=frequencies, times=times, psd_arrays=psd_array)
+                            np.savez(output_folder+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npz', frequencies=frequencies, times=times, psd_arrays=psd_array[:,freq_idx_0:freq_idx_1])
                         else:
                             print('{:}, trigger: {:}'.format(file_str, trigger_i))
-                            np.savez(output_folder+'cutInjection_'+file_str[:-5]+'_trigger_{:}'.format(trigger_i)+'.npz', frequencies=frequencies, times=times, psd_arrays=psd_array)
+                            np.savez(output_folder+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_str.split('_')[1].split('.')[0]))+'_trigger_{:}_'.format(trigger_i)+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npz', frequencies=frequencies, times=times, psd_arrays=psd_array[:,freq_idx_0:freq_idx_1])
                         additional_x = np.array([]) 
                         lastTriggerData_remain = 0 
                         offset = trigger_timestamp * bud.data_len
+                        ThisDataTimestamp = ThisFileTimestamp + np.timedelta64(int(offset/bud.sampling_rate), 's')
                         trigger_frame = 0
                         break
 
