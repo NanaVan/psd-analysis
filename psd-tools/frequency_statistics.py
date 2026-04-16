@@ -4,10 +4,11 @@ import pandas as pd
 from tqdm import tqdm
 
 # 配置路径
-SOURCE_FOLDER = './your_npz_folder' 
+SOURCE_FOLDER = './your_npz_folder/' 
+BASELINE_FOLDER = './your_baseline_folder/'
 OUTPUT_FILE = 'channel_statistics.csv'
 
-def process_spectrums(folder_path, output_csv):
+def process_spectrums(folder_path, output_csv, baseline_path=''):
     # 1. 获取所有 .npz 文件路径并排序
     files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.npz')]
     files.sort()
@@ -25,6 +26,8 @@ def process_spectrums(folder_path, output_csv):
     print(f"正在读取 {num_files} 个文件...")
     
     for i, file_path in enumerate(tqdm(files)):
+        file_name = os.path.basename(file_path)
+        baselinefile_path = os.path.join(baseline_path, "baseline_{:}.npy".format(file_name[:-4]))
         try:
             with np.load(file_path) as data:
                 # 只在读取第一个文件时提取频率信息
@@ -34,6 +37,10 @@ def process_spectrums(folder_path, output_csv):
                 # 对当前文件的 psd_arrays 取均值，得到 (262144,) 的数组
                 # 确保使用 float64 以维持量级差异大的数据的精度
                 spectrum = np.mean(data['psd_arrays'], axis=0).astype('float64')
+                if os.path.exists(baselinefile_path):
+                    spectrum = spectrum / np.load(baselinefile_path)
+                else:
+                    print(f"警告：未找到对应的本底文件 {baselinefile_path}，将跳过本底扣除。")
                 
                 # 将结果存入磁盘映射矩阵的第 i 列
                 matrix[:, i] = spectrum
@@ -87,4 +94,4 @@ def process_spectrums(folder_path, output_csv):
         os.remove(mmap_file)
         print(f"临时映射文件已清理。任务完成！结果保存在: {output_csv}")
 
-process_spectrums(SOURCE_FOLDER, OUTPUT_FILE)
+process_spectrums(SOURCE_FOLDER, OUTPUT_FILE, BASELINE_FOLDER)
