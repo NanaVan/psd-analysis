@@ -118,7 +118,7 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     print("开始 CPU 训练...")
-    for epoch in range(40):
+    for epoch in range(45):
         model.train()
         for i, (imgs, labels) in enumerate(train_loader):
             optimizer.zero_grad()
