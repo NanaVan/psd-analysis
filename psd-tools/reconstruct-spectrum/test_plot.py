@@ -12,7 +12,7 @@ from reconstruct_spectrum import reconstruct_ion_spectrum
 output_folder = 'C:/Users/van4w/Desktop/127La/test_CNN/test/'
 file_strs = ['8243_PY82ch1_0008-0009_2026-04-07T22-12-29.npz', '8243_PY82ch1_0008_trigger_15_2026-04-07T22-12-20.npz', '8243_PY82ch1_0008_trigger_16_2026-04-07T22-12-23.npz', '8243_PY82ch1_0008_trigger_17_2026-04-07T22-12-26.npz', '8243_PY82ch1_0079_trigger_15_2026-04-07T23-15-53.npz', '8243_PY82ch1_0079_trigger_16_2026-04-07T23-15-56.npz', '8243_PY82ch1_0079_trigger_17_2026-04-07T23-15-59.npz', '8243_PY82ch1_0079_trigger_1_2026-04-07T23-15-11.npz', '8243_PY82ch1_0079_trigger_2_2026-04-07T23-15-14.npz', '8243_PY82ch1_0079_trigger_3_2026-04-07T23-15-17.npz', '8243_PY82ch1_0079_trigger_4_2026-04-07T23-15-20.npz']
 
-file_idx = 8
+file_idx = 7
 data = np.load(os.path.join(output_folder,file_strs[file_idx]))
 freq = data['frequencies'][:-1]
 psd = np.mean(data['psd_arrays'], axis=0)

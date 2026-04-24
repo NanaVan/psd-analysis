@@ -31,8 +31,9 @@ def reconstruct_ion_spectrum(raw_data, baseline, k_high=4.0, k_low=1.2):
     
     # --- 优化点 2: 加权特征融合 ---
     # 窄峰能量强调瞬时突变，宽峰能量强调包络
-    energy_fine = np.max(np.abs(cwt_fine), axis=0)
-    energy_wide = np.max(np.abs(cwt_wide), axis=0)
+    # 只保留正向卷积结果（信号向上），负向结果归零
+    energy_fine = np.max(np.maximum(cwt_fine, 0), axis=0)
+    energy_wide = np.max(np.maximum(cwt_wide, 0), axis=0)
     
     # 混合能量分布：让窄信号也能在 energy_dist 中抬起头
     energy_dist = 0.8 * energy_wide + 0.2 * energy_fine
