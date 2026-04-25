@@ -3,7 +3,7 @@
 
 import numpy as np
 from scipy import signal, ndimage
-from scipy.ndimage import label
+from scipy.ndimage import label, binary_dilation, median_filter
 
 try:
     from scipy.signal import cwt, ricker
