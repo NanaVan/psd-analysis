@@ -10,7 +10,7 @@ from psd_array import *
 
 def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_average, overlap_ratio, n_hop=None, window=None, beta=None):
     '''
-    Cutting puyuans' raw data based on injection, for each injection saved as a .npz file
+    Cutting puyuans' raw data based on injection, for each injection saved as a .npz file of spectrogram data 
     Requirement for the data files:
         only recorded from the puyuan 4-channel new devices
         >= 1 triggers in each file
@@ -145,3 +145,66 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
                     lastTriggerData_remain = len(additional_x)
                     offset = 0
                     break
+
+def data_cutInjection(file_folder, file_strs, output_folder):
+    '''
+    Cutting puyuan's raw data based on injection, for each injection saved as a .npy file of raw IQ data
+    Requirement for the data files:
+        only recorded from the puyuan 4-channel new devices
+        >= 1 triggers in each file
+        if no trigger in one file, the pointer of signal will skip the files until find anther file has several triggers.
+
+    file_folder:        .data files' file folder
+    file_strs:          .data file list
+    output_folder:      output .npy files' folder
+    '''
+    if not file_strs:
+        print('No file in the assigned file list, please check and try again.')
+        return
+    first_extension = None
+    try:
+        for filename in file_strs:
+            full_path = os.path.join(file_folder, filename)
+            _, current_extension = os.path.splitext(full_path)
+            if first_extension is None:
+                first_extension = current_extension
+            else:
+                # check if all the suffixes are identical
+                if current_extension != first_extension:
+                    raise ValueError("Error: the suffix of the file '{:}' within the file list is not match!".format(filename))
+        if first_extension not in ['.data']:
+            raise ValueError("Error: All files in the list bear the suffix {:}, must be .data.".format(first_extension))
+    except ValueError as e:
+        print("The files in the list do not meet the requirements. {:}".format(e))
+        sys.exit(1)
+
+    # read for each files
+    file_strs = sorted(file_strs, key=lambda x: int(x.split('_')[1].split('.')[0])) # sorted the files by name
+    additional_x, lastTriggerData_remain, trigger_crossFile, offset = np.array([]), 0, 0, 0
+    for i, file_str in enumerate(file_strs):
+        bud = Preprocessing(file_folder+file_str, puyuan_new=True, abs_trigger=False)
+        ThisFileTimestamp = bud.date_time + np.timedelta64(8, 'h') # convert to '+08' timezone
+        if len(bud.trigger_timestamp) == 0:
+            print('Warning: no trigger in file {:}, skip it. Continue until another file with more than 1 trigger.'.format(file_st))
+            additional_x, offset, trigger_crossFile = np.array([]), 0, 0
+            continue
+        else:
+            for trigger_i, trigger_timestamp in enumerate(bud.trigger_timestamp):
+                ThisTriggerData_remain = trigger_timestamp * bud.data_len - offset
+                if trigger_i ==0 and trigger_crossFile == 0:
+                    offset = trigger_timestamp * bud.data_len
+                    ThisDataTimestamp = ThisFileTimestamp + np.timedelta64(int(offset/bud.sampling_rate), 's')
+                    continue
+                x = np.hstack((additional_x, bud.load(ThisTriggerData_remain,offset)[1]))
+                if trigger_i ==0:
+                    print('Injection between {:} and {:}'.format(file_strs[i-1], file_str))
+                    np.save(output_folder+'IQ_'+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npy', x)
+                else:
+                    print('{:}, trigger: {:}'.format(file_str, trigger_i))
+                    np.save(output_folder+'IQ_'+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_str.split('_')[1].split('.')[0]))+'_trigger_{:}_'.format(trigger_i)+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npy', x)
+                additional_x = np.array([])
+                offset = trigger_timestamp * bud.data_len
+                ThisDataTimestamp = ThisFileTimestamp + np.timedelta64(int(offset/bud.sampling_rate), 's')
+        ThisTriggerData_remain = bud.n_sample - offset
+        additional_x = bud.load(ThisTriggerData_remain,offset)[1]
+        trigger_crossFile, offset = 1, 0

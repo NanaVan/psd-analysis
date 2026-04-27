@@ -1,0 +1,383 @@
+#!/usr/bin/env python3
+# −*− coding:utf-8 −*−
+
+import numpy as np
+import matplotlib.pyplot as plt
+import xml.etree.ElementTree as ET
+from nptdms import TdmsFile
+from typing import List, Dict, Tuple
+from datetime import datetime, timedelta
+import json, sys, os.path, struct, warnings, re
+
+def bcd_to_int(bcd_byte):
+    '''transfer HEX directly to base-10, e.g. 0x46 -> 46'''
+    return (bcd_byte >> 4) * 10 + (bcd_byte & 0x0F)
+
+def read_sua_header256(header_data, puyuan_new):
+    '''
+    read SUA format file with 256-byte header
+    '''
+    if len(header_data) < 256:
+        raise ValueError("Header data must be at least 256 bytes")
+    header = {
+        'magic':        struct.unpack('<I', header_data[0:4])[0],   #0x01DCEF18
+        'prt_count':    struct.unpack('<I', header_data[4:8])[0],
+        'packet_len':   struct.unpack('<I', header_data[8:12])[0],
+        'pack_info':    header_data[12],
+        'data_width':   header_data[13],
+        'interleave':   struct.unpack('<H', header_data[14:16])[0],
+        'channel_count':struct.unpack('<H', header_data[16:18])[0],
+        'channel_id':   struct.unpack('<H', header_data[18:20])[0],
+        'prt_width':    struct.unpack('<I', header_data[20:24])[0],
+        'data_type':    header_data[24],
+        'total_len':    struct.unpack('<I', header_data[25:29])[0],
+    }
+    if puyuan_new:
+        header['center_frequency'] = struct.unpack('<I', header_data[32:36])[0] # [MHz]
+        header['span'] = struct.unpack('<I', header_data[36:40])[0] # [kHz]
+        header['sampling_rate'] = struct.unpack('<I', header_data[40:44])[0] # [kHz]
+        header['date_time'] = '{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}'.format(bcd_to_int(header_data[70])*100+bcd_to_int(header_data[69]), bcd_to_int(header_data[68]), bcd_to_int(header_data[67]), bcd_to_int(header_data[66]), bcd_to_int(header_data[65]), bcd_to_int(header_data[64]))
+        header['syn_count'] = struct.unpack('<Q', header_data[71:79])[0]
+        header['trigger_sign'] = header_data[79] & 0x1
+        header['trigger_count'] = struct.unpack('<Q', header_data[79:87])[0] >> 1
+    else:
+        for i in range(56):
+            header[f'ext_field_{i}'] = struct.unpack('<I', header_data[32+4*i:36+4*i])[0]
+    return header
+data_type_map = {3: np.int8, 5: np.int16, 6: np.int16} # 6: QI pairing, each for int16
+
+def extract_and_convert_time_from_dataFile(path):
+    '''
+    extract time info from .data file (puyuan device), transfer to the float with precision ns.
+    '''
+    parts = path.split('/')
+    try:
+        time_str = next((s for s in parts if re.search(r'TestModePY8[24]', s)), None)
+        if time_str:
+            time_str = re.split(r'TestModePY8[24]_', time_str)[-1]
+        else:
+            raise ValueError('Invalid time info can be extracted from the file folder for the puyuan .data file')
+    except:
+        time_str = next((s for s in parts if 'TestMode' in s), None)
+        if time_str:
+            time_str = time_str.split('TestMode_')[1]
+        else:
+            raise ValueError('Invalid time info can be extracted from the file folder for the puyuan .data file')
+    formatted_time_str = time_str.replace('-', ':', 2).replace('_', ' ', 1).replace('-', ':')
+    _dt = datetime.strptime(formatted_time_str, "%y:%m:%d %H:%M:%S")
+    np_dt64 = np.datetime64(_dt)
+    return float(np_dt64.astype('datetime64[ns]').astype(np.int64))
+
+
+class Preprocessing(object):
+    '''
+    A class for either reading metadata from a .wvh file and importing segments of data from the corresponding .wvd file
+    or reading metadata from a .tiq file and importing segments of data from the same file
+    An auxiliary function is implemented to inspect the read data in the time domain mainly for signal's amplitude overflow-check
+    '''
+
+    n_buffer = 10**5 # maximum number of IQ pairs to be loaded at one time
+
+    def __init__(self, file_str, puyuan_new=False, abs_trigger=True, verbose=True):
+        '''
+        file_str is a string describing the location of the .wvh file or .wvd file
+        puyuan_new:     only required for puyuan device, 
+                        default, False for the 2-channel sample device 
+                        True for the 4-channel new device 
+        abs_trigger:    only required for new puyuan device,
+                        default, True return absolute UTC timestamp (ext from file, not from folder) list of triggers, e.g. ["2026-01-02T00:00:50.00000", "2026-01-02T00:01:00.00000", ...] for 0.1 Hz trigger
+                        False return packet count list of triggers, e.g. [1, 50, 99, ...]
+        '''
+        file_abs = os.path.abspath(file_str)
+        self.fname = os.path.basename(file_abs)
+        self.fpath = os.path.dirname(file_abs)
+        if self.fname[-3:].lower() in ["wvh", "wvd"]:
+            self.file_format = "wv"
+            self.extract_wv()
+        elif self.fname[-3:].lower() == "tiq":
+            self.file_format = "tiq"
+            self.extract_tiq()
+        elif self.fname[-4:].lower() == "tdms":
+            with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+                if ('niRF' in [group.name for group in tdms.groups()]):
+                    self.file_format = "ni_tdms"
+                    self.extract_ni_tdms()
+                elif ('RecordHeader' in [group.name for group in tdms.groups()]):
+                    self.file_format = "tdms"
+                    self.extract_tdms()
+                else:
+                    print("Error: illegal .tdms file format!\nPlease check your .tdms file first!")
+                    sys.exit()
+        elif self.fname[-4:].lower() == "data":
+            self.file_format = "data"
+            self.extract_data(puyuan_new, abs_trigger)
+        else:
+            print("Error: unrecognized file format!\nOnly 'wv' (from R&S devices) or 'tiq' (from Tek devices) or 'tdms' (from NI devices) or 'data' (from puyuan devices) file can be accepted.")
+            sys.exit()
+        if verbose:
+            self.display(puyuan_new)
+
+    def extract_wv(self):
+        '''
+        extract the metadata from the .wvh file
+        '''
+        with open('/'.join((self.fpath, self.fname[:-3]+"wvh"))) as wvh:
+            metadata = json.load(wvh)
+        self.date_time = np.datetime64(metadata["timestamp"])
+        self.data_format = np.dtype(metadata["format"]).newbyteorder(metadata["endian"])
+        self.ref_level = metadata["reference level"] # dBm
+        self.center_frequency = metadata["center frequency"] # Hz
+        self.span = metadata["span"] # Hz
+        self.sampling_rate = metadata["sampling rate"] # Hz
+        self.n_sample = metadata["number of samples"]
+        self.digitizing_depth = metadata["resolution"] # bit
+        self.duration = metadata["duration"] # s
+
+    def extract_tiq(self):
+        '''
+        extract the metadata from the .tiq file
+        '''
+        with open('/'.join((self.fpath, self.fname))) as tiq:
+            self.n_offset = int(tiq.readline().split('"')[1])
+            prefix = '{' + tiq.readline().split('"')[1] + '}'
+        with open('/'.join((self.fpath, self.fname)), "rb") as tiq:
+            root = ET.fromstring(tiq.read(self.n_offset))
+        def get_value(key):
+            return next(root[0][0].iter(prefix + key)).text
+        # since the analyzers are in the same timezone, we use the datetime in a simple way.
+        warnings.filterwarnings("ignore", message="no explicit representation of timezones available for np.datetime64")
+        self.date_time = np.datetime64(get_value("DateTime"))
+        self.data_format = np.dtype(get_value("NumberFormat").lower()).newbyteorder(get_value("Endian").lower())
+        self.ref_level = float(get_value("ReferenceLevel")) # dBm
+        self.center_frequency = float(get_value("Frequency")) # Hz
+        self.span = float(get_value("AcquisitionBandwidth")) # Hz
+        self.sampling_rate = float(get_value("SamplingFrequency")) # Hz
+        self.n_sample = int(get_value("NumberSamples"))
+        self.scaling = float(get_value("Scaling"))
+        self.trig_pos = float(get_value("TriggerPosition")) # s
+
+    def extract_tdms(self):
+        '''
+        extract the metadata from the .tdms file
+        '''
+        with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+            try:
+                self.date_time = tdms['RecordHeader']['datetime'][0]
+            except:
+                self.date_time = np.datetime64(datetime.strptime(self.fpath.split('IQ_')[1], '%d_%m_%Y_%H_%M_%S') + timedelta(seconds=tdms['RecordHeader']['absolute timestamp'][0]))
+            self.span = 1/tdms['RecordHeader']['dt'][0]/1.25 # Hz
+            self.sampling_rate = 1/tdms['RecordHeader']['dt'][0] # Hz
+            self.gain = tdms['RecordHeader']['gain'][0]
+            self.n_sample = 0
+            for chunk in tdms.data_chunks():
+                self.n_sample += len(chunk['RecordData']['I'])
+
+    def extract_ni_tdms(self):
+        '''
+        extract the metadata from the .tdms file from NI test
+        '''
+        with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+            _match = re.search(r'(\d{8})_(\d{2}-\d{2}-\d{2})', self.fname)
+            if _match:
+                date_str = _match.group(1)
+                time_str = _match.group(2)
+                datetime_str = "{:}-{:}-{:}".format(date_str[:4],date_str[4:6],date_str[6:]) + 'T' + time_str.replace('-', ':')
+            self.date_time = np.datetime64(datetime_str)
+            self.span = tdms['niRF']['niRF_iq'].properties['Sample Rate'] # Hz 
+            self.sampling_rate = tdms['niRF']['niRF_iq'].properties['Sample Rate'] # Hz
+            self.ref_level = tdms['niRF']['niRF_iq'].properties['Ref Level(dBm)'] # dBm
+            self.data_format = 'int14'
+            self.gain = tdms['niRF']['niRF_iq'].properties['IQ Gain']
+            self.center_frequency = tdms['niRF']['niRF_iq'].properties['Fc(Hz)'] # Hz
+            self.n_sample = 0
+            for chunk in tdms.data_chunks():
+                self.n_sample += len(chunk['niRF']['niRF_iq'])
+            self.n_sample = int(self.n_sample/2)
+
+
+    def extract_data(self, puyuan_new, abs_trigger):
+        '''
+        extract the metadata from the .data file collected by puyuan device
+        '''
+        self.n_offset = 256 
+        with open('/'.join((self.fpath, self.fname)), 'rb') as f:
+            header_data = read_sua_header256(f.read(self.n_offset), puyuan_new)
+        self.packet_len = header_data['packet_len']
+        self.data_format = data_type_map.get(header_data['data_type'])
+        self.packet_number = os.path.getsize('/'.join((self.fpath, self.fname))) // self.packet_len
+        self.data_len = (self.packet_len - self.n_offset) // self.data_format().itemsize // 2
+        self.n_sample = self.packet_number * self.data_len
+        if puyuan_new:
+            self.sampling_rate = header_data['sampling_rate'] * 1e3
+            self.span = header_data['span'] * 1e3
+            self.gain = 1.0
+            self.center_frequency = header_data['center_frequency'] * 1e6
+            self.date_time = np.datetime64(header_data['date_time'])
+            file_ind = int(re.search(r'_(\d+)\.data', self.fname).group(1))
+            self.date_time_from_folder = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
+            # extract trigger signal
+            self.trigger_timestamp = []
+            last_count = -1
+            with open('/'.join((self.fpath, self.fname)), 'rb') as f:
+                for i in range(self.packet_number):
+                    f.seek(i * self.packet_len, os.SEEK_SET)
+                    header_data = read_sua_header256(f.read(self.n_offset), puyuan_new)
+                    current_count = header_data.get('trigger_count', 0)
+                    if last_count != -1 and current_count > last_count:
+                        if abs_trigger:
+                            _time_delta = int((i + 0.5) * self.data_len / self.sampling_rate * 1e9)  # ns
+                            self.trigger_timestamp.append(self.date_time + np.timedelta64(_time_delta, 'ns')) # setting the timestamp to the middle of the triggered packet
+                        else:
+                            self.trigger_timestamp.append(i)
+                    last_count = current_count
+        else:
+            self.sampling_rate = 31.25e6
+            self.span = self.sampling_rate * 0.8
+            self.gain = 1.0
+            self.center_frequency = 308e6
+            try:
+                file_ind = int(re.search(r'_(\d+)\.data', self.fname).group(1))
+                self.date_time = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
+            except:
+                self.date_time = ''
+                raise ValueError("{:} is invalid for the data file".format(self.fname))
+
+    def display(self, puyuan_new):
+        '''
+        display all the parameters as a list
+        '''
+        print("list of information:\n--------------------")
+        print("file format\t\t\t\t" + self.file_format)
+        print("name of file\t\t\t\t" + self.fname)
+        print("path to file\t\t\t\t" + self.fpath)
+        if puyuan_new:
+            print("timestamp in UTC (ext from file)\t" + str(self.date_time))
+            print("timestamp in UTC (ext from folder)\t" + str(self.date_time_from_folder))
+        else:
+            print("timestamp in UTC \t\t\t" + str(self.date_time))
+        try: # wv, tiq
+            print("data format\t\t\t\t" + repr(self.data_format))
+            print("reference level\t\t\t\t{:g} dBm".format(self.ref_level))
+            print("center frequency\t\t\t{:g} MHz".format(self.center_frequency*1e-6))
+        except AttributeError: 
+            pass
+        print("span\t\t\t\t\t{:g} kHz".format(self.span*1e-3))
+        print("sampling rate\t\t\t\t{:g} kHz".format(self.sampling_rate*1e-3))
+        print("number of samples\t\t\t{:d} IQ pairs".format(self.n_sample))
+        print("recording duration (actual)\t\t{:g} s".format(self.n_sample/self.sampling_rate))
+        if puyuan_new:
+            print("number of samples per packet\t\t{:d} IQ pairs".format(self.data_len))
+            print("number of packets in file\t\t{:d}".format(self.packet_number))
+            print("number of triggers in file\t\t{:d}".format(len(self.trigger_timestamp)))
+        print("--------------------")
+        try: # for wv
+            print("digitizing depth\t\t\t{:d} bits".format(self.digitizing_depth))
+            print("recording duration (set)\t\t{:g} s".format(self.duration))
+        except AttributeError: 
+            try: # for tiq
+                print("scaling\t\t\t\t\t{:g}".format(self.scaling))
+                print("trigger position\t\t\t{:g} s".format(self.trig_pos))
+            except AttributeError: # for tdms
+                print("gain\t\t\t\t\t{:.5e}".format(self.gain))
+        print("--------------------")
+
+    def load(self, size, offset, decimating_factor=1, draw=False):
+        '''
+        size:               amount of IQ pairs to be imported
+        offset:             amount of IQ pairs to be skipped over
+        decimating_factor:  an positive integer by which the data are decimated, the default value 1 means no downsampling
+        '''
+        size = (self.n_sample-offset)//decimating_factor if size*decimating_factor+offset > self.n_sample else size # crop the excessive request
+        times = (np.arange(size)*decimating_factor + offset) / self.sampling_rate # s
+        if self.file_format == "wv":
+            wvd = np.memmap('/'.join((self.fpath, self.fname[:-3]+"wvd")), dtype=self.data_format, offset=offset*2*self.data_format.itemsize, mode='r')
+            data = wvd[:2*size*decimating_factor].reshape(size,2*decimating_factor)[:,:2].flatten().astype(float).view(complex) / (2**(self.digitizing_depth-1) - .5) # V
+        elif self.file_format == "tiq": # for tiq
+            tiq = np.memmap('/'.join((self.fpath, self.fname)), dtype=self.data_format, offset=self.n_offset+offset*2*self.data_format.itemsize, mode='r')
+            data = tiq[:2*size*decimating_factor].reshape(size,2*decimating_factor)[:,:2].flatten().astype(float).view(complex) * self.scaling # V
+        elif self.file_format == "data":  # for puyuan SUA data
+            # amount of IQ pairs for each packet
+            packet_size_for_data = (self.packet_len - self.n_offset) // 2 // self.data_format().itemsize
+            packet_start = offset // packet_size_for_data
+            packet_count = (offset + size) // packet_size_for_data + 1 - packet_start
+            with open('/'.join((self.fpath, self.fname)), 'rb') as sua:
+                sua.seek(packet_start*self.packet_len)
+                data_buffer = np.frombuffer(sua.read(packet_count*self.packet_len), dtype=self.data_format)
+            actual_packet_num = data_buffer.size // (self.packet_len // self.data_format().itemsize)
+            data = np.hstack(data_buffer.reshape(actual_packet_num, -1)[:, self.n_offset//self.data_format().itemsize:])[2*(offset-packet_start*packet_size_for_data):2*(size+offset-packet_start*packet_size_for_data)].reshape(size,2)[:,:2].flatten().astype(float).view(complex).conj() * self.gain # QIQIQI structure
+        else: # for tdms
+            def data_return(_chunk, _offset, _total_size):
+                if _offset >= len(_chunk):
+                    _offset -= len(_chunk)
+                    return _offset, _total_size, []
+                elif _total_size >= len(_chunk[_offset:]):
+                    _total_size -= len(_chunk[_offset:])
+                    return 0, _total_size, _chunk[_offset:]
+                else:
+                    return 0, 0, _chunk[_offset:_offset+_total_size]
+            if self.file_format == 'tdms':
+                with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+                    I_data, Q_data = [], []
+                    I_offset, Q_offset, I_total_size, Q_total_size = offset, offset, size*decimating_factor, size*decimating_factor
+                    for chunk in tdms.data_chunks():
+                        I_offset, I_total_size, _I_data = data_return(chunk['RecordData']['I'], I_offset, I_total_size)
+                        I_data.append(_I_data)
+                        Q_offset, Q_total_size, _Q_data = data_return(chunk['RecordData']['Q'], Q_offset, Q_total_size)
+                        Q_data.append(_Q_data)
+                        if I_total_size == 0 and Q_total_size == 0:
+                            data = (np.hstack(I_data)[::decimating_factor] + 1j * np.hstack(Q_data)[::decimating_factor]) * self.gain # V
+                            break
+            elif self.file_format == 'ni_tdms':
+                with TdmsFile.open('/'.join((self.fpath, self.fname))) as tdms:
+                    IQ_data = []
+                    IQ_offset, IQ_total_size = offset*2, 2*size*decimating_factor
+                    for chunk in tdms.data_chunks():
+                        IQ_offset, IQ_total_size, _IQ_data = data_return(chunk['niRF']['niRF_iq'], IQ_offset, IQ_total_size)
+                        IQ_data.append(_IQ_data)
+                        if IQ_total_size == 0:
+                            data = np.hstack(IQ_data).reshape(size,2*decimating_factor)[:,:2].flatten().astype(float).view(complex) * self.gain # V
+                            break
+            else:
+                pass
+        if draw:
+            self.draw(times, data)
+        else:
+            return times, data # s, V
+
+    def draw(self, t, signal):
+        plt.close("all")
+        fig, (axr, axi) = plt.subplots(2, 1, sharex=True, sharey=True)
+        axr.plot(t, np.real(signal))
+        axr.set_ylabel("in phase")
+        axr.set_title(self.fname)
+        axi.plot(t, np.imag(signal))
+        axi.set_xlim([t.min(), t.max()])
+        axi.set_xlabel("time [s]")
+        axi.set_ylabel("quadrature")
+        plt.show()
+
+    def diagnosis(self, n_point=None, draw=True):
+        '''
+        plot all the data, after downsampling if necessary, in the time domain
+        n_point:    maximum data points in the plot, if omitted, n_buffer is replaced in
+                    negative means all samples without downsampling
+        '''
+        if n_point is None:
+            n_point = self.n_buffer
+        if n_point < 0:
+            offset = 0
+            while self.n_sample > offset+self.n_buffer:
+                self.load(self.n_buffer, offset, 1, draw)
+                offset += self.n_buffer
+            self.load(self.n_buffer, offset, 1, draw)
+        else:
+            decimating_factor = self.n_sample // n_point + 1
+            return self.load(n_point, 0, decimating_factor, draw)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: {} path/to/file".format(__file__))
+        sys.exit()
+    preprocessing = Preprocessing(sys.argv[-1])
+    preprocessing.diagnosis()
