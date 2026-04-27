@@ -4,91 +4,79 @@
 import numpy as np
 from scipy.ndimage import label, binary_dilation, median_filter
 
-def estimate_bayesian_amplitude(single_psd_log, mean_rebuilt, baseline, 
-                                 corr_threshold=0.65, 
-                                 min_width=5,
-                                 noise_floor_std=2.0):
+def estimate_bayesian_amplitude_v6(single_res, template, correlation_threshold=0.6):
     """
-    基于平均谱形状先验的增强型单帧重建算法
-    
-    参数:
-    - single_psd_log: 单帧数据的Log值 (np.log(data['psd_arrays'][i]))
-    - mean_rebuilt:  平均谱重建后的纯信号结果 (作为先验形状)
-    - baseline:      从平均谱中提取的基线 (作为单帧的参考底)
-    - corr_threshold: 相关性门槛，压制"杂草"的关键
-    - min_width:      最小峰宽限制 (物理稀疏性约束)
-    - noise_floor_std: 用于估计局部置信度的噪声标准差倍数
+    融合版：局部去趋势 + 物理尺度投影 + 高相关收缩
     """
-    
-    # 1. 预处理：获取单帧的偏差信号 (Residual)
-    # 注意：单帧由于涨落，log后的基准可能与平均谱基线有偏移
-    residual = single_psd_log - baseline
-    
-    # 2. 识别平均谱中的"先验区域" (Prior Regions)
-    # 找到平均谱中所有显著的峰作为模板
-    peaks, props = find_peaks(mean_rebuilt, height=np.std(mean_rebuilt)*0.5)
-    
-    reconstructed_single = np.zeros_like(residual)
-    
-    # 3. 逐个模板匹配与振幅估计
-    for peak_idx, center in enumerate(peaks):
-        # 确定该峰的范围 (左边界和右边界)
-        # 这里使用简单拓扑，也可以用 props['left_ips'] 等更精确的宽度
-        width_half = 20 # 假设一个经验宽度，或根据 props 计算
-        left = max(0, center - width_half)
-        right = min(len(residual), center + width_half)
+    if len(single_res) < 3:
+        return 0.0
         
-        # 提取模板形状和单帧观测段
-        template_shape = mean_rebuilt[left:right]
-        obs_segment = residual[left:right]
+    # 1. 局部去趋势以提取形状置信度
+    y_detrend = single_res - np.mean(single_res)
+    t_detrend = template - np.mean(template)
+    
+    norm_y = np.linalg.norm(y_detrend)
+    norm_t = np.linalg.norm(t_detrend)
+    
+    if norm_y == 0 or norm_t == 0:
+        return 0.0
         
-        # 只有当模板本身有意义时才继续
-        if np.max(template_shape) <= 0:
-            continue
+    correlation = np.dot(y_detrend, t_detrend) / (norm_y * norm_t)
+    
+    # 2. 形状匹配门槛
+    if correlation < correlation_threshold:
+        return 0.0
+    
+    # 3. 物理尺度投影 (MLE)
+    alpha_ml = np.dot(single_res, template) / (np.dot(template, template) + 1e-9)
+    
+    # 4. 贝叶斯软收缩：使用 correlation 的高次幂压制不确定信号
+    alpha = max(alpha_ml, 0) * (correlation ** 4)
+    
+    return alpha
 
-        # 计算皮尔逊相关系数：验证形状吻合度
-        norm_template = (template_shape - np.mean(template_shape)) / (np.std(template_shape) + 1e-9)
-        norm_obs = (obs_segment - np.mean(obs_segment)) / (np.std(obs_segment) + 1e-9)
-        corr = np.mean(norm_template * norm_obs)
+def reconstruct_ion_psd(single_log_psd, avg_log_psd, baseline, k_prior=3.0, k_local=5.0):
+    """
+    双轨重构算法：
+    - Track 1: 平均谱先验 (解决基线陷阱)
+    - Track 2: 局部显著性 (捞出被掩盖的单帧尖峰)
+    """
+    # A. 提取平均谱先验 Mask
+    signal_template = np.maximum(avg_log_psd - baseline, 0)
+    std_bg = np.std(signal_template)
+    prior_mask = signal_template > (np.median(signal_template) + k_prior * std_bg)
+    prior_mask = binary_dilation(prior_mask, iterations=15)
+    
+    # B. 单帧局部显著性探测 (捞出平均谱里没有的峰)
+    single_smooth = median_filter(single_log_psd, size=3)
+    single_res = single_smooth - baseline
+    
+    # 计算局部信噪比：如果某点远高于周围中值，判定为潜在信号
+    local_median = median_filter(single_res, size=50)
+    local_std = np.std(single_res - local_median)
+    saliency_mask = single_res > (local_median + k_local * local_std)
+    
+    # 合并 Mask：已知区域 + 突发区域
+    combined_mask = prior_mask | saliency_mask
+    
+    # C. 分区域执行贝叶斯重构
+    reconstructed_signal = np.zeros_like(single_log_psd)
+    labels, n = label(combined_mask)
+    
+    for i in range(1, n + 1):
+        region = (labels == i)
+        y_local = single_res[region]
         
-        # 策略 A: 形状不匹配 -> 视为噪声，直接丢弃 (收紧判定门槛)
-        if corr < corr_threshold:
-            continue
+        # 确定模板：如果在先验区，用平均谱形状；如果是突发区，用理想高斯/单点形状
+        if np.any(prior_mask[region]):
+            t_local = signal_template[region]
+        else:
+            # 动态生成简易高斯模板 (假设掩盖的峰是窄峰)
+            t_local = np.exp(-np.linspace(-2, 2, len(y_local))**2)
             
-        # 策略 B: 宽度过滤 -> 剔除孤立尖刺
-        if (right - left) < min_width:
-            continue
-
-        # 4. 贝叶斯振幅估计 (Bayesian Amplitude Estimation)
-        # 模型: obs = alpha * template + noise
-        # 极大似然估计 alpha = dot(obs, template) / dot(template, template)
-        # 考虑到只有正向信号，限制 alpha > 0
-        num = np.sum(obs_segment * template_shape)
-        den = np.sum(template_shape**2)
-        alpha = max(0, num / (den + 1e-9))
+        alpha = estimate_bayesian_amplitude_v6(y_local, t_local, correlation_threshold=0.6)
         
-        # 5. 局部能量门槛 (进一步压制杂草)
-        # 如果估计出的信号峰值还不如局部噪声涨落显著，则收缩
-        local_noise_estimate = np.std(obs_segment - alpha * template_shape)
-        if alpha * np.max(template_shape) < noise_floor_std * local_noise_estimate:
-            # 贝叶斯收缩 (Shrinkage)
-            alpha *= (corr ** 2) # 相关性越低，压制越狠
-            
-        # 写入重建结果
-        reconstructed_single[left:right] = np.maximum(reconstructed_single[left:right], alpha * template_shape)
-
-    # 6. 全局正向约束与平滑
-    reconstructed_single = np.maximum(reconstructed_single, 0)
-    
-    return reconstructed_single
-
-# --- 使用示例 ---
-# rebuilt_spectra = np.zeros_like(data['psd_arrays'])
-# for i, _psd in enumerate(data['psd_arrays']):
-#     single_log = np.log(_psd)
-#     rebuilt_spectra[i,:] = reconstruct_with_shape_prior(
-#         single_log, 
-#         avg_log_psd,  # 这是你“先平均再log”得到的橙线
-#         baseline,
-#         k_prior=2.0   # 这个参数决定了平均谱中多小的峰会被纳入先验
-#     )
+        if alpha > 0:
+            reconstructed_signal[region] = alpha * t_local
+                
+    return baseline + reconstructed_signal
