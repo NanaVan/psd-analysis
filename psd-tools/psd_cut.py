@@ -113,7 +113,7 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
                         frequencies = np.linspace(-bud.sampling_rate/2, bud.sampling_rate/2, n_point+1) # Hz
                         if n_point % 2 == 1: frequencies += bud.sampling_rate / (2*n_point)
                         freq_idx_0, freq_idx_1 = np.searchsorted(frequencies, [-bud.span/2, bud.span/2])
-                        frequencies = frequencies[freq_idx_0:freq_idx_1+1]
+                        frequencies = frequencies[freq_idx_0:freq_idx_1+1] + bud.center_frequency # Hz
                         times = np.arange(trigger_frame+1) / bud.sampling_rate * n_hop # s
                         if trigger_i == 0:
                             print('Injection between {:} and {:}'.format(file_strs[i-1], file_str))
