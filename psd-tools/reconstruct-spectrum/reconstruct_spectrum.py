@@ -3,7 +3,7 @@
 
 import numpy as np
 from scipy import signal, ndimage
-from scipy.ndimage import label, binary_dilation, median_filter
+from scipy.ndimage import label, binary_dilation, gaussian_filter1d
 
 try:
     from scipy.signal import cwt, ricker
@@ -70,3 +70,66 @@ def reconstruct_ion_spectrum(raw_data, baseline, k_high=4.0, k_low=1.2):
     reconstructed = (1 - final_mask) * baseline + final_mask * denoised_raw
     
     return reconstructed
+
+def extract_peaks_moments_robust(f_arr, p_log, min_rel_height=0.05, dilation_size=25):
+    # 1. 基础权重计算
+    weights_raw = np.exp(p_log) - 1
+    
+    # 【关键改进】二次平滑：防止重构谱过于锐化导致的单点峰问题
+    # sigma=1.0 的平滑可以在不改变峰位的前提下，给单点峰分配一点点“邻近权重”
+    weights = gaussian_filter1d(weights_raw, sigma=1.0)
+    
+    max_val = np.max(weights)
+    if max_val <= 0: return []
+
+    # 2. 生成掩模 (使用平滑后的权重)
+    initial_mask = weights > (max_val * 0.002)
+    combined_mask = binary_dilation(initial_mask, structure=np.ones(dilation_size))
+    
+    labels, n_groups = label(combined_mask)
+    
+    peak_results = []
+    for i in range(1, n_groups + 1):
+        idx = (labels == i)
+        wi = weights[idx]
+        fi = f_arr[idx]
+        
+        island_max = np.max(wi)
+        if island_max < (max_val * min_rel_height):
+            continue
+            
+        sum_w = np.sum(wi)
+        if sum_w <= 0: continue
+        
+        # 3. 矩估计
+        mu = np.sum(fi * wi) / sum_w
+        
+        # 计算方差
+        diff_sq = (fi - mu)**2
+        var = np.sum(wi * diff_sq) / sum_w
+        
+        # 如果 var 还是太小，说明平滑力度不够，这里做一个保底
+        if var <= 0:
+            # 这种情况下，尝试使用原始频率分辨率作为最小宽度参考
+            df = np.mean(np.diff(f_arr))
+            sigma = df / 2.0  # 给予一个极小的默认物理宽度
+        else:
+            sigma = np.sqrt(var)
+
+        # 有效样本量计算
+        n_eff = sum_w / island_max
+        # 限制 n_eff 最小为 1，防止除以 0
+        n_eff = max(n_eff, 1.1) 
+        
+        err_pos = sigma / np.sqrt(n_eff)
+        err_sigma = sigma / np.sqrt(2 * n_eff)
+        
+        peak_results.append({
+            'peak_pos': mu,
+            'err_pos': err_pos,
+            'sigma': sigma,
+            'err_sigma': err_sigma,
+            'height_ratio': island_max
+        })
+
+    return sorted(peak_results, key=lambda x: x['peak_pos'])

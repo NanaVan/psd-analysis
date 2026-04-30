@@ -33,10 +33,10 @@ time0 = time.time()
 rebuilt_avg = reconstruct_ion_spectrum(psd_avg, baseline, k_high=8.0, k_low=1.8)
 print('reconstruct spectrum: {:.3f} sec'.format(time.time()-time0))
 
-rebuilt_spectra = np.zeros_like(data['psd_arrays'])
-for i, _psd in enumerate(data['psd_arrays']):
-    rebuilt_spectra[i,:] = reconstruct_ion_psd(np.log(_psd), psd_avg, baseline, k_prior=3.0, k_local=5.0)
-spectra = rebuilt_spectra - baseline
+#rebuilt_spectra = np.zeros_like(data['psd_arrays'])
+#for i, _psd in enumerate(data['psd_arrays']):
+#    rebuilt_spectra[i,:] = reconstruct_ion_psd(np.log(_psd), psd_avg, baseline, k_prior=3.0, k_local=5.0)
+#spectra = rebuilt_spectra - baseline
 
 fig, ax = plt.subplots(3,1, sharex=True)
 ax[0].plot(freq, psd_avg)
@@ -45,6 +45,7 @@ ax[0].set_title(file_strs[file_idx])
 ax[1].plot(freq, rebuilt_avg)
 ax[2].plot(freq, rebuilt_avg-baseline)
 ax[2].set_xlabel('Frequency [Hz]')
+plt.show()
 
 #fig, ax = plt.subplots(3,1, sharex=True)
 #ax[0].plot(freq, np.log(data['psd_arrays'][10]))
@@ -55,9 +56,9 @@ ax[2].set_xlabel('Frequency [Hz]')
 #ax[2].set_xlabel('Frequency [Hz]')
 #plt.show()
 
-fig, ax = plt.subplots()
-waterfall = ax.pcolormesh(data['frequencies'], data['times'], spectra, shading='fading', cmap='viridis')
-ax.set_xlabel('Frequency [Hz]')
-ax.set_ylabel('Time [s]')
-fig.colorbar(waterfall, ax=ax, label='Power Spectral Density [arb. unit]')
-plt.show()
+#fig, ax = plt.subplots()
+#waterfall = ax.pcolormesh(data['frequencies'], data['times'], spectra, shading='fading', cmap='viridis')
+#ax.set_xlabel('Frequency [Hz]')
+#ax.set_ylabel('Time [s]')
+#fig.colorbar(waterfall, ax=ax, label='Power Spectral Density [arb. unit]')
+#plt.show()
