@@ -5,9 +5,12 @@ import os, csv
 import numpy as np
 import pandas as pd
 
-from reconstruct_spectrum import extract_peaks_moments_robust
+from reconstruct_spectrum import extract_peaks_log_detect
 
 reconstruct_folder = 'C:/Users/van4w/Desktop/127La/8243_TestModePY82_26-04-07_22-12-25/reconstructed/'
+base_folder = 'C:/Users/van4w/Desktop/127La/8243_TestModePY82_26-04-07_22-12-25/baseline_cutInjection/'
+raw_folder = '/Users/van4w/Desktop/127La/8243_TestModePY82_26-04-07_22-12-25/cutInjection/'
+
 output_csv = '8243_reconstruct_statics.csv'
 
 reconstruct_files = [f for f in os.listdir(reconstruct_folder) if f.endswith('.npz')]
@@ -61,7 +64,7 @@ for i, file_path in enumerate(reconstruct_files):
         p_log = data['psd_log']
         
         #print(f"进度：{fname} 处理中")
-        peaks = extract_peaks_moments_robust(f_arr, p_log, min_rel_height=0.01, dilation_size=80)
+        peaks = extract_peaks_log_detect(f_arr, p_log, snr_factor=6.0)
         
         if peaks:
             # 实时追加到 CSV

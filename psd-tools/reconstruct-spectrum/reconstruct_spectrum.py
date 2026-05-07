@@ -4,6 +4,7 @@
 import numpy as np
 from scipy import signal, ndimage
 from scipy.ndimage import label, binary_dilation, gaussian_filter1d
+from scipy.signal import find_peaks
 
 try:
     from scipy.signal import cwt, ricker
@@ -133,3 +134,89 @@ def extract_peaks_moments_robust(f_arr, p_log, min_rel_height=0.05, dilation_siz
         })
 
     return sorted(peak_results, key=lambda x: x['peak_pos'])
+
+def extract_peaks_log_detect(f_arr, p_log, snr_factor=3.0):
+    """
+    在对数空间进行统计和种子点寻找，在线性空间进行物理量估计
+    """
+    # 1. 对数空间的信号 (SNR = psd_log - baseline_log)
+    # 理想情况下，无信号区 log_diff 应该围绕 0 波动
+    log_diff = p_log
+    
+    # 对 log_diff 进行轻微平滑，用于稳健地寻找峰尖
+    log_diff_smooth = gaussian_filter1d(log_diff, sigma=1.0)
+    
+    # 2. 在对数空间计算背景统计量 (更稳健)
+    # 使用中位数和 MAD 来定义底噪，弱峰在 log 空间会比在线性空间明显得多
+    log_diff_notZero = log_diff[log_diff!=0]
+    log_median = np.median(log_diff_notZero)
+    log_mad = np.median(np.abs(log_diff_notZero - log_median))
+    # 转换成类似 std 的尺度
+    log_sigma = log_mad / 0.6745
+    
+    # 种子点阈值：log 空间的背景 + N倍波动
+    log_threshold = log_median + snr_factor * log_sigma
+    
+    # 3. 在 Log 空间寻找种子点
+    # distance 可根据你的频率分辨率微调
+    seeds, _ = find_peaks(log_diff_smooth, height=log_threshold, distance=15)
+    
+    # 4. 回到线性空间准备权重
+    weights_raw = np.exp(log_diff) - 1
+    
+    results = []
+    used_indices = np.zeros_like(weights_raw, dtype=bool)
+    
+    for seed in seeds:
+        if used_indices[seed]: continue
+        
+        # 5. 寻找物理边界
+        # 策略：从种子点出发，寻找线性权重回落到接近 0 的地方
+        # 使用你建议的 5 点滑动平均判断
+        n = len(weights_raw)
+        l_idx, r_idx = 0, n - 1
+        
+        # 向左寻边界 (寻找滑动平均跌落回 log 空间的噪声基准)
+        # 这里用 exp(log_median)-1 作为线性空间的基准参考
+        linear_baseline = np.exp(log_median) - 1
+        
+        window = 5
+        for i in range(seed, window - 1, -1):
+            if np.mean(weights_raw[i-window+1 : i+1]) <= linear_baseline:
+                l_idx = i
+                break
+        
+        for i in range(seed, n - window + 1):
+            if np.mean(weights_raw[i : i+window]) <= linear_baseline:
+                r_idx = i
+                break
+        
+        # 标记已处理
+        used_indices[l_idx : r_idx+1] = True
+        
+        # 6. 线性矩估计
+        wi = np.maximum(weights_raw[l_idx : r_idx+1], 0)
+        fi = f_arr[l_idx : r_idx+1]
+        
+        sum_w = np.sum(wi)
+        if sum_w <= 0 or len(wi) < 2: continue
+        
+        mu = np.sum(fi * wi) / sum_w
+        var = np.sum(wi * (fi - mu)**2) / sum_w
+        sigma = np.sqrt(max(var, 0))
+        
+        if sigma == 0:
+            sigma = np.mean(np.diff(f_arr)) / 2.0
+            
+        n_eff = sum_w / np.max(wi)
+        n_eff = max(n_eff, 1.1)
+        
+        results.append({
+            'peak_pos': mu,
+            'err_pos': sigma / np.sqrt(n_eff),
+            'sigma': sigma,
+            'err_sigma': sigma / np.sqrt(2 * n_eff),
+            'height_ratio': np.max(wi)
+        })
+        
+    return sorted(results, key=lambda x: x['peak_pos'])

@@ -1,4 +1,4 @@
-import os
+import os, re
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -7,10 +7,29 @@ from tqdm import tqdm
 SOURCE_FOLDER = './your_npz_folder/' 
 BASELINE_FOLDER = './your_baseline_folder/'
 OUTPUT_FILE = 'channel_statistics.csv'
+fileName_range = [10,400]
+#timestamp_range = ["2026-04-07T22-05-00", "2026-04-08T09-59-59"]
 
-def process_spectrums(folder_path, output_csv, baseline_path=''):
+def process_spectrums(folder_path, output_csv, baseline_path='', fileName_range=[], timestamp_range=[]):
     # 1. 获取所有 .npz 文件路径并排序
-    files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.npz')]
+    _files = [f for f in os.listdir(folder_path) if f.endswith('.npz')]
+    files = []
+    if len(fileName_range) == 2:
+        start_num, end_num = min(fileName_range), max(fileName_range)
+        for f in _files:
+            _match = re.search(r'_(\d{4})_trigger', f)
+            if _match:
+                seq_num = int(_match.group(1))
+                if start_num <= seq_num <= end_num:
+                    files.append(os.path.join(folder_path, f))
+    elif len(timestamp_range) == 2:
+        start_time, end_time = timestamp_range
+        for f in _files:
+            timestamp_str = f[-23:-4]
+            if start_time <= timestamp_str <= end_time:
+                files.append(os.path.join(folder_path, f))
+    else:
+        files = [os.path.join(folder_path, f) for f in _files]
     files.sort()
     
     num_files = len(files)

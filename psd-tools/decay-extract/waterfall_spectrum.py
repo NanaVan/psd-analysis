@@ -55,4 +55,4 @@ def plot_waterfall(file_path, fs=5e6, fc=310e6, f_start=309.86e6, f_end=309.87e6
     plt.show()
 
 iq_datafile = 'C:/Users/van4w/Desktop/127La/8243_TestModePY82_26-04-07_22-12-25/data_cutInjection/IQ_8243_PY82ch1_0264_trigger_12_2026-04-08T02-01-17.npy'
-plot_waterfall(iq_datafile, fs=5e6, fc=310e6)
+plot_waterfall(iq_datafile, fs=5e6, fc=310e6)#, nfft=262144, noverlap=262144//8)
