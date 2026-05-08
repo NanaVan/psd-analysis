@@ -5,6 +5,7 @@ import numpy as np
 from scipy import signal, ndimage
 from scipy.ndimage import label, binary_dilation, gaussian_filter1d
 from scipy.signal import find_peaks
+import matplotlib.pyplot as plt
 
 try:
     from scipy.signal import cwt, ricker
@@ -135,7 +136,7 @@ def extract_peaks_moments_robust(f_arr, p_log, min_rel_height=0.05, dilation_siz
 
     return sorted(peak_results, key=lambda x: x['peak_pos'])
 
-def extract_peaks_log_detect(f_arr, p_log, snr_factor=3.0):
+def extract_peaks_log_detect(f_arr, p_log, p_arr_raw, b_log, snr_factor=3.0):
     """
     在对数空间进行统计和种子点寻找，在线性空间进行物理量估计
     """
@@ -210,13 +211,36 @@ def extract_peaks_log_detect(f_arr, p_log, snr_factor=3.0):
             
         n_eff = sum_w / np.max(wi)
         n_eff = max(n_eff, 1.1)
+
+        # 添加 height_valid 信息，在瀑布图中搜寻离子存在的区域平均到时间上，对于中途发现衰变或者中途产生的离子，height_ratio与height_valid不同
+        l_jdx, r_jdx = np.searchsorted(f_arr, [mu-6*sigma, mu+6*sigma])
+        fj = f_arr[l_jdx : r_jdx+1]
+        pj_raw = np.sum(p_arr_raw[:, l_jdx : r_jdx], axis=-1)
+        pj_cumsum = np.cumsum(pj_raw - np.mean(pj_raw))
+        tdx_change = np.argmax(np.abs(np.diff(np.diff(pj_cumsum)))) + 1
+        Zscore_change = np.max(np.abs(np.diff(np.diff(pj_cumsum)))) / np.std(np.diff(np.diff(pj_cumsum)))
+        if Zscore_change < 3:
+            height_ion = np.max(wi)
+        else:
+            height_ion = max(np.exp(np.max(np.log(np.mean(p_arr_raw[:tdx_change, l_jdx : r_jdx], axis=0)) - b_log[l_jdx : r_jdx]))-1, np.exp(np.max(np.log(np.mean(p_arr_raw[tdx_change:, l_jdx : r_jdx], axis=0)) - b_log[l_jdx : r_jdx]))-1)
         
+        #fig, ax = plt.subplots(2,1, sharex=True)
+        #ax[0].plot(pj_raw)
+        #ax[0].axvline(x=tdx_change, color='tab:red', ls='dashed')
+        #if Zscore_change < 3:
+        #    ax[0].set_title('No Change: {:}\nPSD(total) = {:.2f}, PSD(have ion) = {:.2f}'.format(Zscore_change, np.max(wi), height_ion))
+        #else:
+        #    ax[0].set_title('Have Change: {:}\nPSD(total) = {:.2f}, PSD(have ion) = {:.2f}'.format(Zscore_change, np.max(wi), height_ion))
+        #ax[1].plot(pj_cumsum)
+        #ax[1].axvline(x=tdx_change, color='tab:red', ls='dashed')
+
         results.append({
             'peak_pos': mu,
             'err_pos': sigma / np.sqrt(n_eff),
             'sigma': sigma,
             'err_sigma': sigma / np.sqrt(2 * n_eff),
-            'height_ratio': np.max(wi)
+            'height_ratio': np.max(wi),
+            'height_ion': height_ion
         })
         
     return sorted(results, key=lambda x: x['peak_pos'])
