@@ -136,7 +136,7 @@ def extract_peaks_moments_robust(f_arr, p_log, min_rel_height=0.05, dilation_siz
 
     return sorted(peak_results, key=lambda x: x['peak_pos'])
 
-def extract_peaks_log_detect(f_arr, p_log, p_arr_raw, b_log, snr_factor=3.0):
+def extract_peaks_log_detect(f_arr, p_log, p_arr_raw, p_time_interval, b_log, snr_factor=3.0):
     """
     在对数空间进行统计和种子点寻找，在线性空间进行物理量估计
     """
@@ -221,18 +221,28 @@ def extract_peaks_log_detect(f_arr, p_log, p_arr_raw, b_log, snr_factor=3.0):
         Zscore_change = np.max(np.abs(np.diff(np.diff(pj_cumsum)))) / np.std(np.diff(np.diff(pj_cumsum)))
         if Zscore_change < 3:
             height_ion = np.max(wi)
+            exist_state, exist_timePoints = 0, p_arr_raw.shape[0]
         else:
-            height_ion = max(np.exp(np.max(np.log(np.mean(p_arr_raw[:tdx_change, l_jdx : r_jdx], axis=0)) - b_log[l_jdx : r_jdx]))-1, np.exp(np.max(np.log(np.mean(p_arr_raw[tdx_change:, l_jdx : r_jdx], axis=0)) - b_log[l_jdx : r_jdx]))-1)
+            _temp_0, _temp_1 = np.exp(np.max(np.log(np.mean(p_arr_raw[:tdx_change, l_jdx : r_jdx], axis=0)) - b_log[l_jdx : r_jdx]))-1, np.exp(np.max(np.log(np.mean(p_arr_raw[tdx_change:, l_jdx : r_jdx], axis=0)) - b_log[l_jdx : r_jdx]))-1
+            if _temp_0 > _temp_1 and (np.argmax(pj_cumsum) in [tdx_change-1, tdx_change, tdx_change+1]):
+                height_ion = _temp_0
+                exist_state, exist_timePoints = 1, tdx_change
+            elif _temp_0 < _temp_1 and (np.argmin(pj_cumsum) in [tdx_change-1, tdx_change, tdx_change+1]):
+                height_ion = _temp_1
+                exist_state, exist_timePoints = 2, p_arr_raw.shape[0] - tdx_change
+            else:
+                height_ion = np.max(wi)
+                exist_state, exist_timePoints = 0, p_arr_raw.shape[0]
         
-        #fig, ax = plt.subplots(2,1, sharex=True)
-        #ax[0].plot(pj_raw)
-        #ax[0].axvline(x=tdx_change, color='tab:red', ls='dashed')
-        #if Zscore_change < 3:
-        #    ax[0].set_title('No Change: {:}\nPSD(total) = {:.2f}, PSD(have ion) = {:.2f}'.format(Zscore_change, np.max(wi), height_ion))
-        #else:
-        #    ax[0].set_title('Have Change: {:}\nPSD(total) = {:.2f}, PSD(have ion) = {:.2f}'.format(Zscore_change, np.max(wi), height_ion))
-        #ax[1].plot(pj_cumsum)
-        #ax[1].axvline(x=tdx_change, color='tab:red', ls='dashed')
+        fig, ax = plt.subplots(2,1, sharex=True)
+        ax[0].plot(pj_raw)
+        ax[0].axvline(x=tdx_change, color='tab:red', ls='dashed')
+        if exist_state == 0:
+            ax[0].set_title('No Change: {:}\nPSD(total) = {:.2f}, PSD(have ion) = {:.2f}'.format(Zscore_change, np.max(wi), height_ion))
+        else:
+            ax[0].set_title('Have Change: {:}\nPSD(total) = {:.2f}, PSD(have ion) = {:.2f},\nPSD(before) = {:.2f}, PSD(after) = {:.2f}'.format(Zscore_change, np.max(wi), height_ion, _temp_0, _temp_1))
+        ax[1].plot(pj_cumsum)
+        ax[1].axvline(x=tdx_change, color='tab:red', ls='dashed')
 
         results.append({
             'peak_pos': mu,
@@ -240,7 +250,11 @@ def extract_peaks_log_detect(f_arr, p_log, p_arr_raw, b_log, snr_factor=3.0):
             'sigma': sigma,
             'err_sigma': sigma / np.sqrt(2 * n_eff),
             'height_ratio': np.max(wi),
-            'height_ion': height_ion
+            'height_ion': height_ion,
+            'exist_state': exist_state, # 0: 一直存在; 1: 中途衰变; 2: 中途产生
+            'exist_time': exist_timePoints * p_time_interval # 存在的时间
         })
+
+    # 再检验中途产生情况
         
     return sorted(results, key=lambda x: x['peak_pos'])
