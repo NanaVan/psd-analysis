@@ -201,7 +201,7 @@ def file_cutInjection(file_folder, file_strs, output_folder):
 
                 start_offset, total_to_read = start_pkt * bud.packet_len, (end_pkt -  start_pkt) *  bud.packet_len
         
-                output_name = 'data_' + file_folder.split('/')[-2].split('_')[0] + file_str.split('_')[0] + '_{:04d}'.format(int(file_str.split('_')[1].split('.')[0])) + '_trigger_{:}_'.format(i) + ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S') + '.data' if status == 'complete' else 'data_' + file_folder.split('/')[-2].split('_')[0] + file_str.split('_')[0] + '_{:04d}'.format(int(file_str.split('_')[1].split('.')[0])) + '_trigger_{:}_incomplete_'.format(i) + ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S') + '.data'
+                output_name = 'data_' + file_folder.split('/')[-2].split('_')[0] + '_' + file_str.split('_')[0] + '_{:04d}'.format(int(file_str.split('_')[1].split('.')[0])) + '_trigger_{:}_'.format(i) + ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S') + '.data' if status == 'complete' else 'data_' + file_folder.split('/')[-2].split('_')[0] + '_' + file_str.split('_')[0] + '_{:04d}'.format(int(file_str.split('_')[1].split('.')[0])) + '_trigger_{:}_incomplete_'.format(i) + ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S') + '.data'
                 output_path = os.path.join(output_folder, output_name)
 
                 f_in.seek(start_offset)
