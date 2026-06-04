@@ -213,8 +213,16 @@ class Preprocessing(object):
             self.gain = 1.0
             self.center_frequency = header_data['center_frequency'] * 1e6
             self.date_time = np.datetime64(header_data['date_time'])
-            file_ind = int(re.search(r'_(\d+)\.data', self.fname).group(1))
-            self.date_time_from_folder = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
+            try:
+                file_ind = int(re.search(r'_(\d+)\.data', self.fname).group(1))
+                self.date_time_from_folder = np.datetime64(int(extract_and_convert_time_from_dataFile(self.fpath) + file_ind * self.n_sample / self.sampling_rate * 1e9), 'ns')
+            except:
+                _match = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})', self.fname)
+                if _match:
+                    time_str = _match.group(1)
+                    self.date_time_from_folder = np.datetime64(time_str[:11] + time_str[11:].replace('-', ':'))
+                else:
+                    print("Error: invalid .data file!\nPlease check and read data again.")
             # extract trigger signal
             self.trigger_timestamp = []
             last_count = -1

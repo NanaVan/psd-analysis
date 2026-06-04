@@ -36,6 +36,7 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
                 Hamming, Hanning, and any other generalized Hamming window, overlap_ratio = 0.5
                 Blackman window, overlap_ratio = 2/3 , D = L / 3
     '''
+    file_folder = file_folder+'/' if file_folder[-1] != '/' else file_folder
     if not file_strs:
         print('No file in the assigned file list, please check and try again.')
         return
@@ -75,7 +76,7 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
     fft = pyfftw.builders.fft(dummy, n=n_point, overwrite_input=True, threads=n_thread)
     additional_x, lastTriggerData_remain, trigger_frame, offset = np.array([]), 0, 0, 0
     for i, file_str in enumerate(file_strs):
-        bud = Preprocessing(file_folder+file_str, puyuan_new=True, abs_trigger=False)
+        bud = Preprocessing(os.path.join(file_folder, file_str), puyuan_new=True, abs_trigger=False)
         ThisFileTimestamp = bud.date_time + np.timedelta64(8, 'h') # convert to '+08' timezone
         if len(bud.trigger_timestamp) == 0:
             print('Warning: no trigger in file {:}, skip it. Continue until another file with more than 1 trigger.'.format(file_st))
@@ -117,10 +118,10 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
                         times = np.arange(trigger_frame+1) / bud.sampling_rate * n_hop # s
                         if trigger_i == 0:
                             print('Injection between {:} and {:}'.format(file_strs[i-1], file_str))
-                            np.savez(output_folder+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npz', frequencies=frequencies, times=times, psd_arrays=psd_array[:,freq_idx_0:freq_idx_1])
+                            np.savez(os.path.join(output_folder,file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npz'), frequencies=frequencies, times=times, psd_arrays=psd_array[:,freq_idx_0:freq_idx_1])
                         else:
                             print('{:}, trigger: {:}'.format(file_str, trigger_i))
-                            np.savez(output_folder+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_str.split('_')[1].split('.')[0]))+'_trigger_{:}_'.format(trigger_i)+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npz', frequencies=frequencies, times=times, psd_arrays=psd_array[:,freq_idx_0:freq_idx_1])
+                            np.savez(os.path.join(output_folder,file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_str.split('_')[1].split('.')[0]))+'_trigger_{:}_'.format(trigger_i)+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npz'), frequencies=frequencies, times=times, psd_arrays=psd_array[:,freq_idx_0:freq_idx_1])
                         additional_x = np.array([]) 
                         lastTriggerData_remain = 0 
                         offset = trigger_timestamp * bud.data_len
@@ -146,6 +147,79 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
                     offset = 0
                     break
 
+def file_cutInjection(file_folder, file_strs, output_folder):
+    '''
+    Cutting puyuan's raw data based on injection, for each injection saved as a .data file of each injection with the same format as original file
+    Requirement for the data files:
+        only recorded from the puyuan 4-channel new devices
+        >= 1 triggers in each file
+        if no trigger in one file, the pointer of signal will skip the files until find anther file has several triggers.
+    Different from directly producing PSD, the remaining data (parts of the header and footer in a file that do not form a complete injection) will be kept
+
+    file_folder:        .data files' file folder
+    file_strs:          .data file list
+    output_folder:      output .npy files' folder
+    '''
+    file_folder = file_folder + '/' if file_folder[-1] != '/' else file_folder
+    if not file_strs:
+        print('No file in the assigned file list, please check and try again.')
+        return
+    first_extension = None
+    try:
+        for filename in file_strs:
+            full_path = os.path.join(file_folder, filename)
+            _, current_extension = os.path.splitext(full_path)
+            if first_extension is None:
+                first_extension = current_extension
+            else:
+                # check if all the suffixes are identical
+                if current_extension != first_extension:
+                    raise ValueError("Error: the suffix of the file '{:}' within the file list is not match!".format(filename))
+        if first_extension not in ['.data']:
+            raise ValueError("Error: All files in the list bear the suffix {:}, must be .data.".format(first_extension))
+    except ValueError as e:
+        print("The files in the list do not meet the requirements. {:}".format(e))
+        sys.exit(1)
+
+    # read for each files
+    file_strs = sorted(file_strs, key=lambda x: int(x.split('_')[1].split('.')[0])) # sorted the files by name
+    for i, file_str in enumerate(file_strs):
+        bud = Preprocessing(os.path.join(file_folder, file_str), puyuan_new=True, abs_trigger=False)
+        ThisFileTimestamp = bud.date_time + np.timedelta64(8, 'h') # convert to '+08' timezone
+        checkpoints = [0] + bud.trigger_timestamp + [bud.packet_number]
+        with open(os.path.join(file_folder, file_str), 'rb') as f_in:
+
+            for i in range(len(checkpoints) - 1):
+                start_pkt, end_pkt = checkpoints[i], checkpoints[i+1]
+                ThisDataTimestamp = ThisFileTimestamp + np.timedelta64(int(start_pkt*bud.data_len/bud.sampling_rate), 's')
+                if start_pkt == end_pkt:
+                    continue
+                elif start_pkt == 0 or start_pkt == checkpoints[-2]:
+                    status = 'incomplete'
+                else: 
+                    status = 'complete'
+
+                start_offset, total_to_read = start_pkt * bud.packet_len, (end_pkt -  start_pkt) *  bud.packet_len
+        
+                output_name = 'data_' + file_folder.split('/')[-2].split('_')[0] + file_str.split('_')[0] + '_{:04d}'.format(int(file_str.split('_')[1].split('.')[0])) + '_trigger_{:}_'.format(i) + ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S') + '.data' if status == 'complete' else 'data_' + file_folder.split('/')[-2].split('_')[0] + file_str.split('_')[0] + '_{:04d}'.format(int(file_str.split('_')[1].split('.')[0])) + '_trigger_{:}_incomplete_'.format(i) + ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S') + '.data'
+                output_path = os.path.join(output_folder, output_name)
+
+                f_in.seek(start_offset)
+
+                with open(output_path, 'wb') as f_out:
+                    remaining = total_to_read
+                    buffer_size = 1024 * 1024
+                    while remaining > 0:
+                        read_size = min(remaining, buffer_size)
+                        chunk = f_in.read(read_size)
+                        if not chunk:
+                            break
+                        f_out.write(chunk)
+                        remaining -= len(chunk)
+                print('{:}, trigger {:}'.format(file_str, i))
+            
+
+
 def data_cutInjection(file_folder, file_strs, output_folder):
     '''
     Cutting puyuan's raw data based on injection, for each injection saved as a .npy file of raw IQ data
@@ -158,6 +232,7 @@ def data_cutInjection(file_folder, file_strs, output_folder):
     file_strs:          .data file list
     output_folder:      output .npy files' folder
     '''
+    file_folder = file_folder+'/' if file_folder[-1] != '/' else file_folder
     if not file_strs:
         print('No file in the assigned file list, please check and try again.')
         return
@@ -182,7 +257,7 @@ def data_cutInjection(file_folder, file_strs, output_folder):
     file_strs = sorted(file_strs, key=lambda x: int(x.split('_')[1].split('.')[0])) # sorted the files by name
     additional_x, lastTriggerData_remain, trigger_crossFile, offset = np.array([]), 0, 0, 0
     for i, file_str in enumerate(file_strs):
-        bud = Preprocessing(file_folder+file_str, puyuan_new=True, abs_trigger=False)
+        bud = Preprocessing(os.path.join(file_folder, file_str), puyuan_new=True, abs_trigger=False)
         ThisFileTimestamp = bud.date_time + np.timedelta64(8, 'h') # convert to '+08' timezone
         if len(bud.trigger_timestamp) == 0:
             print('Warning: no trigger in file {:}, skip it. Continue until another file with more than 1 trigger.'.format(file_st))
@@ -198,13 +273,14 @@ def data_cutInjection(file_folder, file_strs, output_folder):
                 x = np.hstack((additional_x, bud.load(ThisTriggerData_remain,offset)[1]))
                 if trigger_i ==0:
                     print('Injection between {:} and {:}'.format(file_strs[i-1], file_str))
-                    np.save(output_folder+'IQ_'+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npy', x)
+                    np.save(os.path.join(output_folder,'IQ_'+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npy'), x)
                 else:
                     print('{:}, trigger: {:}'.format(file_str, trigger_i))
-                    np.save(output_folder+'IQ_'+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_str.split('_')[1].split('.')[0]))+'_trigger_{:}_'.format(trigger_i)+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npy', x)
+                    np.save(os.path.join(output_folder,'IQ_'+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_str.split('_')[1].split('.')[0]))+'_trigger_{:}_'.format(trigger_i)+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npy'), x)
                 additional_x = np.array([])
                 offset = trigger_timestamp * bud.data_len
                 ThisDataTimestamp = ThisFileTimestamp + np.timedelta64(int(offset/bud.sampling_rate), 's')
         ThisTriggerData_remain = bud.n_sample - offset
         additional_x = bud.load(ThisTriggerData_remain,offset)[1]
         trigger_crossFile, offset = 1, 0
+
