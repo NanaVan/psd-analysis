@@ -97,8 +97,8 @@ for ii, file_path in enumerate(reconstruct_files):
                         if peaks[j]['exist_state'] == 2 and j not in used_indices:
                             # 条件A：exist_time 之和与总时间之差在2倍时间间隔之内
                             time_condition = np.abs(peaks[i]['exist_time'] + peaks[j]['exist_time'] - np.load(raw_path)['times'][-1]) <= 2 * p_time_interval
-                            # 条件B：激发态离子的频率小于基态离子的频率
-                            pos_condition = peaks[i]['peak_pos'] < peaks[j]['peak_pos']
+                            # 条件B：激发态离子的频率小于基态离子的频率，且两者之差在 80 kHz 之内
+                            pos_condition = (peaks[i]['peak_pos'] < peaks[j]['peak_pos']) and np.abs(peaks[i]['peak_pos'] - peaks[j]['peak_pos']) <= 80e3 
                             if time_condition and pos_condition:
                                 pair_counter += 1
                                 peaks[i]['pair_num'], peaks[j]['pair_num'] = pair_counter, pair_counter
