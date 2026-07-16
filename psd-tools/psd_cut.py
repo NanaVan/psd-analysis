@@ -158,7 +158,7 @@ def file_cutInjection(file_folder, file_strs, output_folder):
 
     file_folder:        .data files' file folder
     file_strs:          .data file list
-    output_folder:      output .npy files' folder
+    output_folder:      output .data files' folder
     '''
     file_folder = file_folder + '/' if file_folder[-1] != '/' else file_folder
     if not file_strs:
