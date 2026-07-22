@@ -261,6 +261,7 @@ class Preprocessing(object):
         if puyuan_new:
             print("timestamp in UTC (ext from file)\t" + str(self.date_time))
             print("timestamp in UTC (ext from folder)\t" + str(self.date_time_from_folder))
+            print("center frequency\t\t\t{:g} MHz".format(self.center_frequency*1e-6))
         else:
             print("timestamp in UTC \t\t\t" + str(self.date_time))
         try: # wv, tiq
