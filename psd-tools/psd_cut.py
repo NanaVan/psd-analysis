@@ -118,7 +118,7 @@ def psd_cutInjection(file_folder, file_strs, output_folder, window_length, n_ave
                         times = np.arange(trigger_frame+1) / bud.sampling_rate * n_hop # s
                         if trigger_i == 0:
                             print('Injection between {:} and {:}'.format(file_strs[i-1], file_str))
-                            np.savez(os.path.join(output_folder,file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npz'), frequencies=frequencies, times=times, psd_arrays=psd_array[:,freq_idx_0:freq_idx_1])
+                            np.savez(os.path.join(output_folder,file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+'trigger_'+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npz'), frequencies=frequencies, times=times, psd_arrays=psd_array[:,freq_idx_0:freq_idx_1])
                         else:
                             print('{:}, trigger: {:}'.format(file_str, trigger_i))
                             np.savez(os.path.join(output_folder,file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_str.split('_')[1].split('.')[0]))+'_trigger_{:}_'.format(trigger_i)+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npz'), frequencies=frequencies, times=times, psd_arrays=psd_array[:,freq_idx_0:freq_idx_1])
@@ -273,7 +273,7 @@ def data_cutInjection(file_folder, file_strs, output_folder):
                 x = np.hstack((additional_x, bud.load(ThisTriggerData_remain,offset)[1]))
                 if trigger_i ==0:
                     print('Injection between {:} and {:}'.format(file_strs[i-1], file_str))
-                    np.save(os.path.join(output_folder,'IQ_'+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npy'), x)
+                    np.save(os.path.join(output_folder,'IQ_'+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_strs[i-1].split('_')[1].split('.')[0]))+'-'+'{:04d}_'.format(int(file_str.split('_')[1].split('.')[0]))+'trigger_'+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npy'), x)
                 else:
                     print('{:}, trigger: {:}'.format(file_str, trigger_i))
                     np.save(os.path.join(output_folder,'IQ_'+file_folder.split('/')[-2].split('_')[0]+'_'+file_str.split('_')[0]+'_{:04d}'.format(int(file_str.split('_')[1].split('.')[0]))+'_trigger_{:}_'.format(trigger_i)+ThisDataTimestamp.astype('datetime64[s]').item().strftime('%Y-%m-%dT%H-%M-%S')+'.npy'), x)
