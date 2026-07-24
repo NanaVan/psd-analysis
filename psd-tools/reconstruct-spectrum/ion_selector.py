@@ -210,6 +210,7 @@ class FastLargeDataPlotter(QMainWindow):
             self.df_ref = pd.read_csv(self.linedit_refFile.text())
             self.df_data['ion'] = ''
             self.df_data['harmonic'] = np.nan
+            self.df_ref.columns = self.df_ref.str.replace(r"\s*\(.*?\)", "", regex=True) # 正则匹配说明：\s*\(.*?\) 匹配空格 + 左括号 + 任意内容 + 右括号，去除列名中的“括号极其内容”
             self.label_items = [] 
 
             self.plot_reference_lines()
