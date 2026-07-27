@@ -210,8 +210,11 @@ class FastLargeDataPlotter(QMainWindow):
             self.df_ref = pd.read_csv(self.linedit_refFile.text())
             self.df_data['ion'] = ''
             self.df_data['harmonic'] = np.nan
-            self.df_ref.columns = self.df_ref.str.replace(r"\s*\(.*?\)", "", regex=True) # 正则匹配说明：\s*\(.*?\) 匹配空格 + 左括号 + 任意内容 + 右括号，去除列名中的“括号极其内容”
+            
+            # 修正：在 columns 上使用 .str.replace
+            self.df_ref.columns = self.df_ref.columns.str.replace(r"\s*\(.*?\)", "", regex=True)
             self.label_items = [] 
+            self.current_ion_brushes = None  # 重置填充色缓存
 
             self.plot_reference_lines()
             self.plot_data()
@@ -239,13 +242,9 @@ class FastLargeDataPlotter(QMainWindow):
                 x_val = ion_info[0]
                 ion_label = ion + '\nsigma: {:.3f}\nh = {:d}'.format(ion_info[-1], ion_info[1])
 
-                # 绘制虚线竖线
                 line = pg.InfiniteLine(pos=x_val, angle=90, pen=pg.mkPen('lightgray', width=1.5, style=Qt.DashLine))
                 self.p_main.addItem(line)
-                # 创建标签
-                # anchor=(0, 0) 表示以文字左上角为基准点
                 text = pg.TextItem(text=ion_label, color='lightgray', anchor=(0, 0))
-                # 初始先随便放个位置，update_histograms 会修正它
                 self.p_main.addItem(text)
         except Exception as e:
             QMessageBox.critical(
@@ -256,6 +255,8 @@ class FastLargeDataPlotter(QMainWindow):
             )
             self.btn_addRef.setEnabled(True)
             self.btn_addRef.setText('Add ref.')
+            return
+            
         try:
             self.label_items.append((x_val, text))
         except Exception as e:
@@ -272,68 +273,123 @@ class FastLargeDataPlotter(QMainWindow):
         self.btn_addRef.setText('Add ref.')
 
     def plot_reference_lines(self):
-
         for _, row in self.df_ref.iterrows():
             x_val = row['peak_loc'] * 1e3
             ion_label = row['ion'] + '\nsigma: {:.3f}\nh = {:d}'.format(row['peak_sig'] * 1e3, row['harmonic'])
             
-            # 绘制虚线竖线
             line = pg.InfiniteLine(pos=x_val, angle=90, pen=pg.mkPen('lightgray', width=1.5, style=Qt.DashLine))
             self.p_main.addItem(line)
 
-            # 创建标签
-            # anchor=(0, 0) 表示以文字左上角为基准点
             text = pg.TextItem(text=ion_label, color='lightgray', anchor=(0, 0))
-            # 初始先随便放个位置，update_histograms 会修正它
             self.p_main.addItem(text)
             self.label_items.append((x_val, text))
 
-        # 生成动态标签
         self.dynamic_labels = []
 
     def plot_data(self):
-        self.scatter = pg.ScatterPlotItem(
-            x=self.df_data['peak_pos'], y=self.df_data['height_ion'],
-            size=12, pen=pg.mkPen('lightgray', width=1), brush=None, symbol='o')
-        df_pair = self.df_data[self.df_data['pair_num']!=0]
+        # 1. 获取 exist_time 数据范围
+        times = self.df_data['exist_time'].values
+        t_min = times.min() if len(times) > 0 else 0.0
+        t_max = times.max() if len(times) > 0 else 2.9
+        if t_max == t_min:
+            t_max = t_min + 1e-5
+
+        # 2. 保存 Viridis ColorMap 对象供全局调色使用
+        self.pg_cmap = pg.colormap.getFromMatplotlib('viridis')
+
+        # 3. 创建散点图
+        self.scatter = pg.ScatterPlotItem(x=self.df_data['peak_pos'], y=self.df_data['height_ion'], size=10, symbol='o')
+
+        # 4. 绘制 Pair 连线
+        df_pair = self.df_data[self.df_data['pair_num'] != 0]
         x0_pair, x1_pair, y0_pair, y1_pair = [], [], [], []
         for i, group in df_pair.groupby('filename'):
             for j in np.unique(group['pair_num'].values):
-                x0_pair.append(group[(group['pair_num']==j)&(group['exist_state']==1)]['peak_pos'].values[0])
-                x1_pair.append(group[(group['pair_num']==j)&(group['exist_state']==2)]['peak_pos'].values[0])
-                y0_pair.append(group[(group['pair_num']==j)&(group['exist_state']==1)]['height_ion'].values[0])
-                y1_pair.append(group[(group['pair_num']==j)&(group['exist_state']==2)]['height_ion'].values[0])
-        x_pair = np.vstack((x0_pair,x1_pair,np.full_like(x0_pair,np.nan,dtype=np.float64))).T.ravel()[:-1]
-        y_pair = np.vstack((y0_pair,y1_pair,np.full_like(y0_pair,np.nan,dtype=np.float64))).T.ravel()[:-1]
-        decay_line = pg.PlotCurveItem(x=x_pair, y=y_pair, connect='finite', pen=pg.mkPen(color='lightgray', width=1))
-        self.p_main.addItem(self.scatter)
-        self.p_main.addItem(decay_line)
+                sub1 = group[(group['pair_num'] == j) & (group['exist_state'] == 1)]
+                sub2 = group[(group['pair_num'] == j) & (group['exist_state'] == 2)]
+                if not sub1.empty and not sub2.empty:
+                    x0_pair.append(sub1['peak_pos'].values[0])
+                    x1_pair.append(sub2['peak_pos'].values[0])
+                    y0_pair.append(sub1['height_ion'].values[0])
+                    y1_pair.append(sub2['height_ion'].values[0])
 
-        # 添加十字准星线，方便对齐
+        if x0_pair:
+            x_pair = np.vstack((x0_pair, x1_pair, np.full_like(x0_pair, np.nan, dtype=np.float64))).T.ravel()[:-1]
+            y_pair = np.vstack((y0_pair, y1_pair, np.full_like(y0_pair, np.nan, dtype=np.float64))).T.ravel()[:-1]
+            decay_line = pg.PlotCurveItem(x=x_pair, y=y_pair, connect='finite', pen=pg.mkPen(color=(200, 200, 200, 120), width=1))
+            self.p_main.addItem(decay_line)
+
+        self.p_main.addItem(self.scatter)
+
+        # 5. 创建或刷新 ColorBar 并绑定滑块拖动事件
+        if not hasattr(self, 'colorbar'):
+            try:
+                self.colorbar = pg.ColorBarItem(values=(t_min, t_max), colorMap=self.pg_cmap, label='Exist Time (s)')
+            except TypeError:
+                self.colorbar = pg.ColorBarItem(values=(t_min, t_max), cmap=self.pg_cmap, label='Exist Time (s)')
+            
+            if hasattr(self.colorbar, 'setPlot'):
+                self.colorbar.setPlot(self.p_main)
+            else:
+                try:
+                    self.colorbar.setImageItem(None, insertIn=self.p_main)
+                except TypeError:
+                    self.win.addItem(self.colorbar, row=0, col=2)
+            
+            # 监听 ColorBar 交互滑块，变动时触发实时重绘
+            self.colorbar.sigLevelsChanged.connect(self.on_colorbar_levels_changed)
+        else:
+            self.colorbar.setLevels((t_min, t_max))
+
+        # 初始渲染
+        self.on_colorbar_levels_changed()
+
+        # 十字准星
         self.v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color='white', style=Qt.DotLine))
         self.h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(color='white', style=Qt.DotLine))
         self.p_main.addItem(self.v_line, ignoreBounds=True)
         self.p_main.addItem(self.h_line, ignoreBounds=True)
         self.p_main.scene().sigMouseMoved.connect(self.on_mouse_moved)
 
+    def on_colorbar_levels_changed(self):
+        """拖动 ColorBar 滑块时，实时更新散点外框 (pen) 的 exist_time 颜色映射"""
+        if not hasattr(self, 'df_data') or self.df_data is None or self.df_data.empty:
+            return
+
+        # 1. 读取 ColorBar 当前交互调出的极值
+        c_min, c_max = self.colorbar.levels()
+        if c_max == c_min:
+            c_max = c_min + 1e-5
+
+        # 2. 根据最新的 levels 对 exist_time 重新做 Normalize
+        times = self.df_data['exist_time'].values
+        norm_times = np.clip((times - c_min) / (c_max - c_min), 0.0, 1.0)
+
+        # 3. 生成基于 Viridis 的外框线条颜色的 Pen 列表
+        qcolors = self.pg_cmap.map(norm_times, mode='qcolor')
+        pen_list = [pg.mkPen(color=c, width=1.5) for c in qcolors]
+
+        # 4. 获取当前的 Brush 列表（如果有 GMM 结果则填充 ion 离散色，无则全空）
+        brush_list = getattr(self, 'current_ion_brushes', None)
+
+        # 5. 刷新散点绘制
+        self.scatter.setData(
+            x=self.df_data['peak_pos'],
+            y=self.df_data['height_ion'],
+            size=10,
+            pen=pen_list,
+            brush=brush_list,
+            symbol='o'
+        )
+
     def on_mouse_moved(self, evt):
-        pos = evt  # 获取鼠标当前位置 (QPointF 像素坐标)
-        
-        # 获取 p_main 的 ViewBox (用于处理坐标转换和边界判断)
+        pos = evt
         view_box = self.p_main.vb
-        
-        # 确保鼠标在画布的有效绘图区域内
         if view_box.sceneBoundingRect().contains(pos):
-            # 将像素坐标 (pos) 转换成数据坐标 (mousePoint)
             mouse_point = view_box.mapSceneToView(pos)
-            
             x_val = mouse_point.x()
             y_val = mouse_point.y()
-
-            # 更新状态栏文本（保留2位小数）
             self.coord_label.setText(f"Freq: {x_val:.2f}, Height: {y_val:.4f}")
-
-            # 联动更新十字准星的位置
             self.v_line.setPos(x_val)
             self.h_line.setPos(y_val)
 
@@ -341,7 +397,7 @@ class FastLargeDataPlotter(QMainWindow):
         if self.spin_x0.value() >= self.spin_x1.value() or self.spin_y0.value() >= self.spin_y1.value():
             return
 
-        self.btn_gmm.setEnabled(False) # 防止误触
+        self.btn_gmm.setEnabled(False)
         self.btn_gmm.setText('GMM running ...')
 
         spin_vals = [self.spin_x0.value(), self.spin_x1.value(), self.spin_y0.value(), self.spin_y1.value()]
@@ -354,7 +410,6 @@ class FastLargeDataPlotter(QMainWindow):
                 f"Input dict format error! \n\nError: {e}\n\nPlease check and input again."+"\n\n\nExample: {'195Os75(1)+':[308000756.01,204],'195Os75(0)+':[308000960.24,204]}",
                 QMessageBox.Ok
             )
-            # 弹窗出错误信息
             self.btn_gmm.setEnabled(True)
             self.btn_gmm.setText('GMM run')
             return
@@ -376,37 +431,43 @@ class FastLargeDataPlotter(QMainWindow):
         self.df_data['ion'] = possible_ion_range
         self.df_data['harmonic'] = possible_harmonic_range
         
-        # 动态生成有效ion的颜色映射表
+        # 1. 获取选中的离散离子种类，并分配离散颜色
         real_unique_ions = [ion for ion in self.df_data['ion'].unique() if ion != '']
         num_colors = len(real_unique_ions)
+        
         if num_colors > 0:
             colors = [pg.intColor(i, num_colors) for i in range(num_colors)]
             ion_color_map = dict(zip(real_unique_ions, colors))
         else:
             ion_color_map = {}
 
-        # 为全部数据构建对应的brush列表：如果ion有值，则填入分组颜色；如果是空字符串 ''，则维持None 
-        brush_list = [pg.mkBrush(ion_color_map[ion]) if ion != '' else pg.mkBrush(None) for ion in self.df_data['ion']]
-        self.scatter.setData(x=self.df_data['peak_pos'], y=self.df_data['height_ion'], 
-                size=12, pen=pg.mkPen('lightgray', width=1), brush=brush_list, symbol='o')
+        # 2. 为全部数据构建对应的填充色（brush）列表
+        self.current_ion_brushes = [
+            pg.mkBrush(ion_color_map[ion]) if ion != '' else None 
+            for ion in self.df_data['ion']
+        ]
 
-        # 清理上一次运行生成的旧动态标签
+        # 3. 重新渲染散点（外框 pen 会自动匹配 ColorBar 当前范围）
+        self.on_colorbar_levels_changed()
+
+        # 4. 清理旧标签
         if not hasattr(self, 'dynamic_labels'):
             self.dynamic_labels = []
         for old_text_item in self.dynamic_labels:
             self.p_main.removeItem(old_text_item)
         self.dynamic_labels.clear()
 
-        # 按 ion 分组计算中心点并绘制新标签
+        # 5. 按 ion 分组绘制新标签（文字颜色与填色相同）
         for ion_name in real_unique_ions:
             df_sub = self.df_data[self.df_data['ion'] == ion_name]
             if df_sub.empty:
                 continue
             unique_harmonics = df_sub['harmonic'].unique()
             for h in unique_harmonics:
-                _df_sub = df_sub[df_sub['harmonic']==h]
+                _df_sub = df_sub[df_sub['harmonic'] == h]
                 x_center = _df_sub['peak_pos'].mean()
                 y_position = _df_sub['height_ion'].min()
+                
                 text_item = pg.TextItem(text=ion_name, color=ion_color_map[ion_name], anchor=(0.5, 0))
                 text_item.setPos(x_center, y_position)
                 self.p_main.addItem(text_item)
@@ -420,8 +481,11 @@ class FastLargeDataPlotter(QMainWindow):
         self.df_data['ion'] = ''
         self.df_data['harmonic'] = np.nan
 
-        self.scatter.setData(x=self.df_data['peak_pos'], y=self.df_data['height_ion'],
-                size=12, pen=pg.mkPen('lightgray', width=1), brush=None, symbol='o')
+        # 重置填充色为空心
+        self.current_ion_brushes = None
+
+        # 刷新渲染
+        self.on_colorbar_levels_changed()
 
         if not hasattr(self, 'dynamic_labels'):
             self.dynamic_labels = []
@@ -459,20 +523,15 @@ class FastLargeDataPlotter(QMainWindow):
         view_range = self.p_main.viewRange()
         x_range, y_range = view_range[0], view_range[1]
         
-        # 计算标签位置：取当前视图 y 轴顶部的 95% 处，避免文字被边缘裁掉
         y_label_pos = y_range[1] - (y_range[1] - y_range[0]) * 0.05
 
         for x_val, text_item in self.label_items:
-            # 更新位置
             text_item.setPos(x_val, y_label_pos)
-            
-            # 只有在 x 轴可见范围内才显示
             if x_val > x_range[0] and x_val < x_range[1]:
                 text_item.setVisible(True)
             else:
                 text_item.setVisible(False)
 
-        # --- 以下为直方图逻辑，保持 BarGraphItem 方案 ---
         mask = (self.df_data['peak_pos'] >= x_range[0]) & (self.df_data['peak_pos'] <= x_range[1]) & \
                (self.df_data['height_ion'] >= y_range[0]) & (self.df_data['height_ion'] <= y_range[1])
         visible_data = self.df_data[mask]
@@ -496,7 +555,6 @@ class FastLargeDataPlotter(QMainWindow):
 
 
 if __name__ == "__main__":
-    
     app = QApplication(sys.argv)
     demo = FastLargeDataPlotter()
     demo.show()
