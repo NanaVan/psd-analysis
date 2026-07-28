@@ -4,6 +4,9 @@
 import csv
 import os
 import re
+import time  # 引入时间模块进行 Benchmark 统计
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
@@ -15,102 +18,78 @@ from reconstruct_spectrum import extract_peaks_log_detect
 
 # ================= 1. 路径与配置参数 =================
 # 8243 (PY82)
-# reconstruct_folder = '/mnt/nas_DAQRoom/analyzed_data/puyuan82_data/data/8243_TestModePY82_26-04-07_22-12-25/reconstructed/'
-# base_folder        = '/mnt/nas_DAQRoom/analyzed_data/puyuan82_data/data/8243_TestModePY82_26-04-07_22-12-25/baseline_cutInjection/'
-# raw_folder         = '/mnt/nas_DAQRoom/analyzed_data/puyuan82_data/data/8243_TestModePY82_26-04-07_22-12-25/cutInjection/'
-# raw_data_folder    = '/mnt/nas82_2/raw_data/puyuan82_data/Data/8243_TestModePY82_26-04-07_22-12-25/'
-# channel_prefix     = 'PY82ch1'
-# output_csv         = '8243_reconstruct_statics_ionMean_decay.csv'
-
-# 8251 (PY84)
-reconstruct_folder = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/reconstructed/'
-base_folder        = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/baseline_cutInjection/'
-raw_folder         = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/cutInjection/'
-raw_data_folder    = '/mnt/nas82_2/raw_data/puyuan84_data/Data/8251_TestModePY84_26-04-07_22-13-23/'
-channel_prefix     = 'PY84ch1'
-output_csv         = '8251_reconstruct_statics_ionMean_decay.csv'
+reconstruct_folder = '/mnt/nas_DAQRoom/analyzed_data/puyuan82_data/data/8243_TestModePY82_26-04-07_22-12-25/reconstructed/'
+base_folder        = '/mnt/nas_DAQRoom/analyzed_data/puyuan82_data/data/8243_TestModePY82_26-04-07_22-12-25/baseline_cutInjection/'
+raw_folder         = '/mnt/nas_DAQRoom/analyzed_data/puyuan82_data/data/8243_TestModePY82_26-04-07_22-12-25/cutInjection/'
+raw_data_folder    = '/mnt/nas82_2/raw_data/puyuan82_data/Data/8243_TestModePY82_26-04-07_22-12-25/'
+channel_prefix     = 'PY82ch1'
+output_csv         = '8243_reconstruct_statics_ionMean_decay_3.csv'
+# reconstruct_folder = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/reconstructed/'
+# base_folder        = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/baseline_cutInjection/'
+# raw_folder         = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/cutInjection/'
+# raw_data_folder    = '/mnt/nas82_2/raw_data/puyuan84_data/Data/8251_TestModePY84_26-04-07_22-13-23/'
+# channel_prefix     = 'PY84ch1'
+# output_csv         = '8251_reconstruct_statics_ionMean_decay_2.csv'
 
 fileIdx_range = [0, 799]
+MAX_WORKERS   = 8  # 并行线程数
 
-# ================= 2. 基础信号处理与数据读取 =================
-def parse_npz_filename(filename, folder_path, prefix="PY82ch1"):
-    """解析 npz 文件名并转换为 0-indexed trigger 索引及原始 .data 路径"""
+# ================= 2. 基础信号处理与解析函数 =================
+def parse_npz_filename(filename, prefix="PY82ch1"):
     match_single = re.search(rf'_{prefix}_(\d{{4}})_trigger_(\d+)_', filename)
     match_cross  = re.search(rf'_{prefix}_(\d{{4}})-(\d{{4}})_', filename)
 
     if match_single:
         seq_num = int(match_single.group(1))
-        trigger_index = int(match_single.group(2)) - 1  # 转换 1-indexed 为 0-indexed
-        return os.path.join(folder_path, f"{prefix}_{seq_num}.data"), None, trigger_index, False
+        trigger_index = int(match_single.group(2)) - 1
+        return seq_num, None, trigger_index, False
     elif match_cross:
         seq_curr, seq_next = int(match_cross.group(1)), int(match_cross.group(2))
-        return (
-            os.path.join(folder_path, f"{prefix}_{seq_curr}.data"),
-            os.path.join(folder_path, f"{prefix}_{seq_next}.data"),
-            None,
-            True,
-        )
+        return seq_curr, seq_next, None, True
     else:
         return None, None, None, False
 
 def extract_envelope(data, center_freq, bw, fs_val, order=4):
-    """IQ 解调提取指定频段包络"""
     t = np.arange(len(data)) / fs_val
     shifted = data * np.exp(-1j * 2 * np.pi * center_freq * t)
     b, a = butter(order, (bw / 2.0) / (0.5 * fs_val), btype='low')
     return np.abs(filtfilt(b, a, shifted.real) + 1j * filtfilt(b, a, shifted.imag))
 
-def load_iq_raw_signal(fname, raw_data_dir, prefix):
-    """从原始 .data 加载全量 IQ 切片（含跨文件拼接逻辑）"""
-    file_path, next_file_path, trigger_index, is_cross_file = parse_npz_filename(fname, raw_data_dir, prefix)
-    if not file_path or not os.path.exists(file_path):
-        return None, None, None
+def is_decayed_in_window(env, fs, start_idx, threshold_ratio=0.3):
+    """
+    判断粒子在 start_idx 生成后，在后续观测窗口内是否发生了衰变消失
+    """
+    if start_idx >= len(env) - int(0.05 * fs):
+        return False
+    
+    # 获取生成后的稳态信号均值
+    stable_signal = env[start_idx + int(0.02 * fs) : start_idx + int(0.1 * fs)]
+    if len(stable_signal) == 0:
+        return False
+    baseline_high = np.mean(stable_signal)
 
-    bud = Preprocessing(file_path, puyuan_new=True, abs_trigger=False)
-    fs = bud.sampling_rate
-    total_triggers = len(bud.trigger_timestamp)
-
-    if is_cross_file or trigger_index is None:
-        trigger_index = total_triggers - 1
-
-    start_sample = max(0, int(bud.trigger_timestamp[trigger_index] * bud.data_len))
-    if not is_cross_file and trigger_index < total_triggers - 1:
-        end_sample = int(bud.trigger_timestamp[trigger_index + 1] * bud.data_len)
-    else:
-        end_sample = bud.n_sample
-
-    slice_len_samples = end_sample - start_sample
-    _, raw_data_curr = bud.load(size=slice_len_samples, offset=start_sample, draw=False)
-    raw_times_curr = np.arange(slice_len_samples) / fs
-
-    raw_data, raw_times = raw_data_curr, raw_times_curr
-
-    if is_cross_file and next_file_path and os.path.exists(next_file_path):
-        bud_next = Preprocessing(next_file_path, puyuan_new=True, abs_trigger=False)
-        end_sample_next = (
-            int(bud_next.trigger_timestamp[0] * bud_next.data_len)
-            if len(bud_next.trigger_timestamp) > 0
-            else bud_next.n_sample
-        )
-        _, raw_data_next = bud_next.load(size=end_sample_next, offset=0, draw=False)
-        raw_times_next = (np.arange(end_sample_next) / fs) + (raw_times_curr[-1] + 1.0 / fs)
-        raw_data = np.concatenate([raw_data_curr, raw_data_next])
-        raw_times = np.concatenate([raw_times_curr, raw_times_next])
-
-    return raw_data, raw_times, fs
+    # 检查尾部信号是否显著下降
+    tail_signal = np.mean(env[-int(0.05 * fs):])
+    return tail_signal < (baseline_high * threshold_ratio)
 
 # ================= 3. 精确衰变计算算法 =================
-def compute_precise_pair_decay(raw_data, raw_times, fs, parent_freq, daughter_freq):
-    """【配对峰】IQ 双频道包络差值 zero-crossing 求解"""
+def compute_precise_chain_decay(raw_data, raw_times, fs, parent_freq, daughter_freq, approx_t):
+    """
+    基于 A 消失与 B 生成的差分包络过零点计算精确节点时刻 t
+    """
     bandwidth = 1500.0
     parent_env = extract_envelope(raw_data, parent_freq, bandwidth, fs)
     daughter_env = extract_envelope(raw_data, daughter_freq, bandwidth, fs)
     diff_env = daughter_env - parent_env
 
-    search_mask = (raw_times >= 0.35) & (raw_times <= min(0.8, raw_times[-1]))
+    # 围绕先验时刻 approx_t 展开 0.2s 的搜索窗口
+    t_start = max(0.1, approx_t - 0.1)
+    t_end = min(raw_times[-1] - 0.05, approx_t + 0.1)
+    search_mask = (raw_times >= t_start) & (raw_times <= t_end)
     search_indices = np.where(search_mask)[0]
+    
     if len(search_indices) == 0:
-        return None, None
+        return approx_t, 1.0 / (2.0 * bandwidth)
 
     diff_in_search = diff_env[search_indices]
     decision_window = int(0.006 * fs)
@@ -123,8 +102,8 @@ def compute_precise_pair_decay(raw_data, raw_times, fs, parent_freq, daughter_fr
     zero_cross_idx = search_indices[found_idx]
     decay_time_raw = raw_times[zero_cross_idx]
 
-    # 物理误差估计
-    pre_mask = (raw_times >= 0.10) & (raw_times < 0.30)
+    # 估算噪声与斜率
+    pre_mask = (raw_times >= max(0, decay_time_raw - 0.15)) & (raw_times < decay_time_raw - 0.05)
     post_mask = (raw_times > decay_time_raw + 0.05) & (raw_times <= min(decay_time_raw + 0.15, raw_times[-1]))
     sigma_noise = (
         np.sqrt((np.std(diff_env[pre_mask])**2 + np.std(diff_env[post_mask])**2) / 2.0)
@@ -147,30 +126,30 @@ def compute_precise_pair_decay(raw_data, raw_times, fs, parent_freq, daughter_fr
     return decay_time_raw, sigma_total
 
 def compute_precise_single_decay(raw_data, raw_times, fs, peak_freq, exist_state, approx_time):
-    """【孤立峰】IQ 单频道包络台阶响应拟合 (Step-function fit)"""
+    """
+    单信号边缘拟合 (erf 阶跃)
+    exist_state == 1 或 消失沿: fit_type='falling'
+    exist_state == 2/3 或 生成沿: fit_type='rising'
+    """
     bandwidth = 1500.0
     env = extract_envelope(raw_data, peak_freq, bandwidth, fs)
 
-    # 下采样加速拟合
-    ds = int(fs / 10000)  # ~10 kHz 采样点
+    ds = max(1, int(fs / 10000))
     t_sub = raw_times[::ds]
     env_sub = env[::ds]
 
-    # 定义 Erf 台阶拟合函数
+    # exist_state == 1 代表消失沿（下降沿），3 代表生成沿（上升沿）
     if exist_state == 1:
-        # 下降台阶：从高平台降至低平台
         def step_func(t, A, B, t0, sigma_t):
             return 0.5 * A * (1 - erf((t - t0) / (np.sqrt(2) * sigma_t))) + B
     else:
-        # 上升台阶：从低平台升至高平台
         def step_func(t, A, B, t0, sigma_t):
             return 0.5 * A * (1 + erf((t - t0) / (np.sqrt(2) * sigma_t))) + B
 
-    # 初始参数估算
     p0 = [np.ptp(env_sub), np.min(env_sub), approx_time, 0.005]
     bounds = (
-        [0, 0, 0.1, 0.0001],
-        [np.inf, np.inf, min(1.0, raw_times[-1]), 0.05]
+        [0, 0, 0.05, 0.0001],
+        [np.inf, np.inf, min(raw_times[-1], approx_time + 0.3), 0.05]
     )
 
     try:
@@ -178,150 +157,305 @@ def compute_precise_single_decay(raw_data, raw_times, fs, peak_freq, exist_state
         t_event = popt[2]
         err_fit = np.sqrt(np.diag(pcov))[2]
         
-        # 考虑滤波器延迟带宽不确定度
         sigma_filter = 1.0 / (2.0 * bandwidth)
         sigma_total = np.sqrt(err_fit**2 + sigma_filter**2)
 
         return t_event, sigma_total
     except Exception:
-        # 若拟合收敛失败，退回为初始粗略时间与常规带宽不确定度
         return approx_time, 1.0 / (2.0 * bandwidth)
 
-# ================= 4. 筛选待处理文件与断点续传 =================
-file_pattern = re.compile(r'_(?:(\d{4})_trigger|(\d{4})-\d{4}_)')
-_files = [f for f in os.listdir(reconstruct_folder) if f.endswith('.npz')]
-reconstruct_files = []
-start_num, end_num = min(fileIdx_range), max(fileIdx_range)
+# ================= 4. 单个 Trigger 的处理函数 =================
+def process_single_trigger(fname, bud_curr, bud_next_cache, total_triggers, fs):
+    seq_curr, seq_next, trigger_index, is_cross_file = parse_npz_filename(fname, prefix=channel_prefix)
 
-for f in _files:
-    _match = file_pattern.search(f)
-    if _match:
-        seq_str = _match.group(1) or _match.group(2)
-        if start_num <= int(seq_str) <= end_num:
-            reconstruct_files.append(f)
+    if is_cross_file or trigger_index is None:
+        trigger_index = total_triggers - 1
 
-reconstruct_files.sort()
-print(f"共找到 {len(reconstruct_files)} 个待处理文件。")
+    start_sample = max(0, int(bud_curr.trigger_timestamp[trigger_index] * bud_curr.data_len))
+    if not is_cross_file and trigger_index < total_triggers - 1:
+        end_sample = int(bud_curr.trigger_timestamp[trigger_index + 1] * bud_curr.data_len)
+    else:
+        end_sample = bud_curr.n_sample
 
-mode = 'w'
-processed_files = set()
-if os.path.exists(output_csv):
-    choice = input(f"检测到 {output_csv} 已存在。是否跳过已处理文件? (yes/no): ").lower()
-    if choice in ['yes', 'y']:
-        existing_df = pd.read_csv(output_csv)
-        if 'filename' in existing_df.columns:
-            processed_files = set(existing_df['filename'].unique())
-        mode = 'a'
-        print(f"跳过 {len(processed_files)} 个已处理文件。")
+    slice_len_samples = end_sample - start_sample
+    _, raw_data_curr = bud_curr.load(size=slice_len_samples, offset=start_sample, draw=False)
+    raw_times_curr = np.arange(slice_len_samples) / fs
 
-fieldnames = [
-    'peak_pos', 'err_pos', 'sigma', 'err_sigma', 'height_ratio', 'height_ion', 
-    'exist_state', 'exist_time', 'err_exist_time', 'valid', 'pair_num', 'filename'
-]
+    raw_iq_data, raw_iq_times = raw_data_curr, raw_times_curr
 
-if mode == 'w':
-    with open(output_csv, 'w', newline='') as f:
-        csv.DictWriter(f, fieldnames=fieldnames).writeheader()
-
-# ================= 5. 主处理循环 =================
-for ii, fname in enumerate(reconstruct_files):
-    if fname in processed_files:
-        continue
+    if is_cross_file and bud_next_cache is not None:
+        end_sample_next = (
+            int(bud_next_cache.trigger_timestamp[0] * bud_next_cache.data_len)
+            if len(bud_next_cache.trigger_timestamp) > 0
+            else bud_next_cache.n_sample
+        )
+        _, raw_data_next = bud_next_cache.load(size=end_sample_next, offset=0, draw=False)
+        raw_times_next = (np.arange(end_sample_next) / fs) + (raw_times_curr[-1] + 1.0 / fs)
+        raw_iq_data = np.concatenate([raw_data_curr, raw_data_next])
+        raw_iq_times = np.concatenate([raw_times_curr, raw_times_next])
 
     file_path = os.path.join(reconstruct_folder, fname)
     base_path = os.path.join(base_folder, fname.replace("reconstruct_", "baseline_").replace('.npz', '.npy'))
     raw_path  = os.path.join(raw_folder, fname.replace("reconstruct_", ""))
 
-    try:
-        data = np.load(file_path)
-        f_arr = data['frequencies']
-        p_log = data['psd_log']
-        raw_npz = np.load(raw_path)
-        p_arr_raw = raw_npz['psd_arrays']
-        total_time = raw_npz['times'][-1]
-        p_time_interval = raw_npz['times'][1] - raw_npz['times'][0]
-        b_log = np.log(np.load(base_path))
+    data = np.load(file_path)
+    f_arr = data['frequencies']
+    p_log = data['psd_log']
+    raw_npz = np.load(raw_path)
+    p_arr_raw = raw_npz['psd_arrays']
+    total_time = raw_npz['times'][-1]
+    p_time_interval = raw_npz['times'][1] - raw_npz['times'][0]
+    b_log = np.log(np.load(base_path))
 
-        peaks = extract_peaks_log_detect(f_arr, p_log, p_arr_raw, p_time_interval, b_log, snr_factor=6.0)
+    peaks = extract_peaks_log_detect(f_arr, p_log, p_arr_raw, p_time_interval, b_log, snr_factor=6.0)
 
-        if peaks:
-            for p in peaks:
-                p['pair_num'] = 0
-                p['valid'] = 0 if p['exist_state'] == 2 else 1
+    if not peaks:
+        return []
 
-            pair_counter, used_indices = 0, set()
+    for p in peaks:
+        p['pair_num'] = 0
+        p['valid'] = 1
+        p['is_stable_in_window'] = False
 
-            # --- A. 寻找并配对 (Pair Detection) ---
-            for i in range(len(peaks)):
-                if peaks[i]['exist_state'] == 1 and i not in used_indices:
-                    for j in range(len(peaks)):
-                        if peaks[j]['exist_state'] == 2 and j not in used_indices:
-                            time_condition = np.abs(peaks[i]['exist_time'] + peaks[j]['exist_time'] - total_time) <= 2 * p_time_interval
-                            pos_condition = (peaks[i]['peak_pos'] < peaks[j]['peak_pos']) and (np.abs(peaks[i]['peak_pos'] - peaks[j]['peak_pos']) <= 80e3)
+    # ------------ 1. 松散事件配对 (寻找 A 消失与 B/C 生成的交叉节点 t1) ------------
+    pair_counter = 0
+    node_t1_pairs = []  # 存储 (idx_A, idx_child, approx_t1, pair_num)
 
-                            if time_condition and pos_condition:
-                                pair_counter += 1
-                                peaks[i]['pair_num'], peaks[j]['pair_num'] = pair_counter, pair_counter
-                                peaks[i]['valid'], peaks[j]['valid'] = 1, 1
-                                used_indices.add(i)
-                                used_indices.add(j)
-                                break
+    for i, p_A in enumerate(peaks):
+        if p_A['exist_state'] == 1:
+            t_A_end = p_A.get('exist_time', total_time / 2.0)
+            
+            # 优先匹配 B (State 2)
+            matched_child = False
+            for j, p_B in enumerate(peaks):
+                if p_B['exist_state'] == 2:
+                    t_B_start = p_B.get('start_time', total_time - p_B.get('exist_time', 0))
+                    # 只要交界时间差在 3 个 PSD 时间步长内，即判定为事件节点配对
+                    if abs(t_A_end - t_B_start) <= 3 * p_time_interval:
+                        pair_counter += 1
+                        node_t1_pairs.append((i, j, t_A_end, pair_counter))
+                        matched_child = True
+                        break
 
-            # --- B. 读取全量 IQ 信号统一求解 exist_time ---
-            raw_iq_data, raw_iq_times, fs = load_iq_raw_signal(fname, raw_data_folder, channel_prefix)
+            # 如果没找到 B，看是否直接匹配 C (State 3, 如大角度散射或特例)
+            if not matched_child:
+                for k, p_C in enumerate(peaks):
+                    if p_C['exist_state'] == 3:
+                        t_C_start = p_C.get('start_time', total_time - p_C.get('exist_time', 0))
+                        if abs(t_A_end - t_C_start) <= 3 * p_time_interval:
+                            pair_counter += 1
+                            node_t1_pairs.append((i, k, t_A_end, pair_counter))
+                            break
 
-            for i, p in enumerate(peaks):
-                st = p['exist_state']
+    # ------------ 2. 精确节点时刻求解 ------------
+    t1_exact_dict = {}
 
-                # 1. 未衰变稳定离子
-                if st == 0:
-                    p['exist_time'] = total_time
-                    p['err_exist_time'] = 0.0
+    for idx_A, idx_child, approx_t1, p_num in node_t1_pairs:
+        p_A = peaks[idx_A]
+        p_child = peaks[idx_child]
+        p_A['pair_num'] = p_num
+        p_child['pair_num'] = p_num
 
-                # 2. 成功配对的衰变/生成对（使用 IQ 差分零交叉）
-                elif st in [1, 2] and p['pair_num'] > 0:
-                    if st == 1:
-                        # 找到对应的配对子核
-                        pair_idx = next(j for j, pk in enumerate(peaks) if pk['pair_num'] == p['pair_num'] and pk['exist_state'] == 2)
-                        
-                        if raw_iq_data is not None:
-                            t_dec, err_dec = compute_precise_pair_decay(
-                                raw_iq_data, raw_iq_times, fs, p['peak_pos'], peaks[pair_idx]['peak_pos']
-                            )
-                            if t_dec is not None:
-                                p['exist_time'] = t_dec
-                                p['err_exist_time'] = err_dec
+        t1, err_t1 = compute_precise_chain_decay(
+            raw_iq_data, raw_iq_times, fs, p_A['peak_pos'], p_child['peak_pos'], approx_t1
+        )
+        t1_exact_dict[idx_A] = (t1, err_t1)
+        p_child['_exact_birth'] = (t1, err_t1)  # 暂存子核精确生成时刻
 
-                                peaks[pair_idx]['exist_time'] = total_time - t_dec
-                                peaks[pair_idx]['err_exist_time'] = err_dec
-                                print(f"[{fname}] Pair {p['pair_num']}: IQ双核差分精算 t_decay = {t_dec:.6f} s ± {err_dec*1000:.3f} ms")
+    # ------------ 3. 各种粒子的存在寿命/时刻赋值 ------------
+    for idx, p in enumerate(peaks):
+        st = p['exist_state']
 
-                # 3. 未配对的孤立衰变/生成峰（IQ 单核包络台阶拟合）
-                elif st in [1, 2] and p['pair_num'] == 0:
-                    if raw_iq_data is not None:
-                        approx_t = p['exist_time'] if st == 1 else (total_time - p['exist_time'])
-                        t_event, err_event = compute_precise_single_decay(
-                            raw_iq_data, raw_iq_times, fs, p['peak_pos'], st, approx_t
-                        )
-                        
-                        if st == 1:
-                            p['exist_time'] = t_event
-                        else:
-                            p['exist_time'] = total_time - t_event
-                        p['err_exist_time'] = err_event
-                        print(f"[{fname}] Single Peak ({p['peak_pos']/1e3:.1f}kHz, State {st}): IQ单核拟合 t_event = {t_event:.6f} s ± {err_event*1000:.3f} ms")
-                    else:
-                        p['err_exist_time'] = p_time_interval
+        if st == 0:
+            # 贯穿核
+            p['exist_time'] = total_time
+            p['err_exist_time'] = 0.0
+            p['is_stable_in_window'] = True
 
-            # --- C. 追加写入 CSV ---
+        elif st == 1:
+            # 【母核 A】
+            if idx in t1_exact_dict:
+                # 成功与子核配对：差分包络过零点精确求解
+                p['exist_time'], p['err_exist_time'] = t1_exact_dict[idx]
+            else:
+                # A 衰变后完全看不到子核（飞出储能环等）：退回单信号下降沿 fitting
+                t_decay, err_decay = compute_precise_single_decay(
+                    raw_iq_data, raw_iq_times, fs, p['peak_pos'], 1, p.get('exist_time', total_time / 2.0)
+                )
+                p['exist_time'] = t_decay
+                p['err_exist_time'] = err_decay
+
+        elif st in [2, 3]:
+            # 【子核 B 或 孙核 C】
+            # 1. 获取精确生成时刻 t1
+            if '_exact_birth' in p:
+                t1, err_t1 = p['_exact_birth']
+            else:
+                # 孤立子核（没看到 A）：拟合自身上升沿
+                app_birth = total_time - p.get('exist_time', total_time / 2.0)
+                t1, err_t1 = compute_precise_single_decay(
+                    raw_iq_data, raw_iq_times, fs, p['peak_pos'], 3, app_birth
+                )
+
+            # 2. 判断 B/C 是否在观测窗口内发生了衰变
+            bandwidth = 1500.0
+            env_sub = extract_envelope(raw_iq_data, p['peak_pos'], bandwidth, fs)
+            start_idx = int(t1 * fs)
+            has_decayed = is_decayed_in_window(env_sub, fs, start_idx)
+
+            if has_decayed:
+                # B 发生了衰变（极少数情况）：拟合其下降沿 t2
+                app_t2 = p.get('end_time', t1 + 0.5)
+                t2, err_t2 = compute_precise_single_decay(
+                    raw_iq_data, raw_iq_times, fs, p['peak_pos'], 1, app_t2
+                )
+                p['exist_time'] = max(0.0, t2 - t1)
+                p['err_exist_time'] = np.sqrt(err_t1**2 + err_t2**2)
+                p['is_stable_in_window'] = False
+            else:
+                # B 大概率不发生衰变（长寿命/稳定核，贯穿至窗口末尾）
+                p['exist_time'] = t1  # 记录生成时刻 t1（代表母核寿命或 B 生成点）
+                p['err_exist_time'] = err_t1
+                p['is_stable_in_window'] = True
+
+    for p in peaks:
+        p['filename'] = fname
+        if '_exact_birth' in p:
+            del p['_exact_birth']  # 清理临时属性
+
+    return peaks
+
+# 辅助函数：格式化秒数为 HH:MM:SS
+def format_time(seconds):
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+# ================= 5. 主程序与 Benchmark 统计 =================
+if __name__ == '__main__':
+    print("正在扫描并对 .data 文件建立倒排索引...")
+
+    file_pattern = re.compile(r'_(?:(\d{4})_trigger|(\d{4})-\d{4}_)')
+    all_npz_files = [f for f in os.listdir(reconstruct_folder) if f.endswith('.npz')]
+    start_num, end_num = min(fileIdx_range), max(fileIdx_range)
+
+    data_to_npz_map = defaultdict(list)
+    total_matched_files = 0
+
+    for fname in all_npz_files:
+        match = file_pattern.search(fname)
+        if match:
+            seq_str = match.group(1) or match.group(2)
+            seq_num = int(seq_str)
+            if start_num <= seq_num <= end_num:
+                data_to_npz_map[seq_num].append(fname)
+                total_matched_files += 1
+
+    # 断点续传
+    mode = 'w'
+    processed_files = set()
+    if os.path.exists(output_csv):
+        choice = input(f"检测到 {output_csv} 已存在。是否跳过已处理文件? (yes/no): ").lower()
+        if choice in ['yes', 'y']:
+            existing_df = pd.read_csv(output_csv)
+            if 'filename' in existing_df.columns:
+                processed_files = set(existing_df['filename'].unique())
+            mode = 'a'
+            print(f"跳过 {len(processed_files)} 个已处理文件。")
+
+    fieldnames = [
+        'peak_pos', 'err_pos', 'sigma', 'err_sigma', 'height_ratio', 'height_ion', 
+        'exist_state', 'exist_time', 'err_exist_time', 'valid', 'pair_num', 
+        'is_stable_in_window', 'filename'
+    ]
+
+    if mode == 'w':
+        with open(output_csv, 'w', newline='') as f:
+            csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+
+    # 需要处理的 .data 文件清单
+    todo_seq_nums = [
+        seq for seq, files in sorted(data_to_npz_map.items()) 
+        if any(f not in processed_files for f in files)
+    ]
+    
+    total_data_count = len(todo_seq_nums)
+    print(f"\n==================== 任务初始化完成 ====================")
+    print(f"待处理 .data 文件数 : {total_data_count} 个")
+    print(f"包含 trigger 注入点   : {total_matched_files} 个")
+    print(f"并行计算线程数       : {MAX_WORKERS}")
+    print(f"========================================================\n")
+
+    # Benchmark 变量定义
+    global_start_time = time.time()
+    completed_data_count = 0
+    time_history = []
+
+    for idx, seq_num in enumerate(todo_seq_nums, 1):
+        data_start_time = time.time()
+        
+        npz_list = data_to_npz_map[seq_num]
+        unprocessed_npz = [f for f in npz_list if f not in processed_files]
+
+        curr_data_path = os.path.join(raw_data_folder, f"{channel_prefix}_{seq_num}.data")
+        if not os.path.exists(curr_data_path):
+            print(f"警告 [{idx}/{total_data_count}]: 原始数据缺失，跳过 -> {curr_data_path}")
+            continue
+
+        # 1. 读取并解析 .data
+        bud_curr = Preprocessing(curr_data_path, puyuan_new=True, abs_trigger=False)
+        fs = bud_curr.sampling_rate
+        total_triggers = len(bud_curr.trigger_timestamp)
+
+        has_cross = any(parse_npz_filename(f, prefix=channel_prefix)[3] for f in unprocessed_npz)
+        bud_next_cache = None
+        if has_cross:
+            next_data_path = os.path.join(raw_data_folder, f"{channel_prefix}_{seq_num + 1}.data")
+            if os.path.exists(next_data_path):
+                bud_next_cache = Preprocessing(next_data_path, puyuan_new=True, abs_trigger=False)
+
+        # 2. 多线程并行计算
+        batch_results = []
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_fname = {
+                executor.submit(process_single_trigger, fname, bud_curr, bud_next_cache, total_triggers, fs): fname 
+                for fname in unprocessed_npz
+            }
+
+            for future in as_completed(future_to_fname):
+                fname = future_to_fname[future]
+                try:
+                    res_peaks = future.result()
+                    if res_peaks:
+                        batch_results.extend(res_peaks)
+                except Exception as e:
+                    print(f"错误: 线程处理 {fname} 异常 -> {e}")
+
+        # 3. 追加写写盘
+        if batch_results:
             with open(output_csv, 'a', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
-                for p in peaks:
-                    p['filename'] = fname
-                    writer.writerow(p)
+                for peak_row in batch_results:
+                    writer.writerow(peak_row)
 
-        if (ii + 1) % 10 == 0 or (ii + 1) == len(reconstruct_files):
-            print(f"进度: {ii+1}/{len(reconstruct_files)} - 已处理: {fname}")
+        # 4. 【Benchmark 统计与节点打印】
+        data_elapsed = time.time() - data_start_time
+        time_history.append(data_elapsed)
+        completed_data_count += 1
+        
+        remaining_data_count = total_data_count - completed_data_count
+        avg_time_per_data = np.mean(time_history[-10:])  # 取最近 10 个文件的移动平均耗时
+        eta_seconds = remaining_data_count * avg_time_per_data
+        
+        pct = (completed_data_count / total_data_count) * 100
 
-    except Exception as e:
-        print(f"错误: 处理文件 {fname} 时出错 - {e}")
+        print(
+            f"[{completed_data_count}/{total_data_count} | {pct:5.1f}%] "
+            f"文件: {channel_prefix}_{seq_num}.data (含{len(unprocessed_npz)}个trigger) | "
+            f"用时: {data_elapsed:6.2f}s | "
+            f"剩余: {remaining_data_count:3d} 个 | "
+            f"预计剩余时间 (ETA): {format_time(eta_seconds)}"
+        )
+
+    total_cost_time = time.time() - global_start_time
+    print(f"\n全部处理完成！总耗时: {format_time(total_cost_time)}")
