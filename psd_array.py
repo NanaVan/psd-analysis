@@ -92,7 +92,7 @@ def psd_array_btm(bud, offset, window_length, n_frame, n_hop, padding_ratio=0, w
         psd_array[index:] = np.fft.fftshift(np.absolute(fft_1(ifft(np.absolute(fft(signal))**2) * window_sequence))) / bud.sampling_rate
     return frequencies, times, psd_array, n_dof # Hz, s, V^2/Hz, 1
 
-def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length, n_average, overlap_ratio, puyuan_new=True, n_hop=None, padding_ratio=0, window=None, beta=None):
+def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length, n_average, overlap_ratio, puyuan_new=True, n_hop=None, padding_ratio=0, window=None, beta=None, save_trigger=False):
     '''
     Average Periodogram (Welch) Method Spectral Estimation for multiple .tdms or .data files from NI or puyuan devices
     
@@ -110,6 +110,7 @@ def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length
     window:             to be chosen from ["bartlett", "blackman", "hamming", "hanning", "kaiser", etc.] (from scipy.signal.windows)
                         if None, a rectangular window is implied
                         if "kaiser" is given, an additional argument of beta is expected
+    save_trigger:       True, return trigger_times
     ***
     https://ccrma.stanford.edu/~jos/sasp/Welch_s_Method_Windows.html#sec:wwelch
     overlap_ratio should always match the window to reduce side-lobe level
@@ -162,7 +163,14 @@ def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length
     fft = pyfftw.builders.fft(dummy, n=n_point, overwrite_input=True, threads=n_thread)
     sampling_rate, center_frequency = 0, 0
     for i, file_str in enumerate(file_strs):
-        bud = Preprocessing(file_folder+file_str, puyuan_new=puyuan_new)
+        bud = Preprocessing(file_folder+file_str, puyuan_new=puyuan_new, abs_trigger=False)
+        if save_trigger:
+            if i == 0:
+                trigger_times = np.array(bud.trigger_timestamp) * bud.data_len / bud.sampling_rate
+                total_time = bud.data_len * bud.packet_number / bud.sampling_rate
+            else:
+                trigger_times = np.hstack((trigger_times, np.array(bud.trigger_timestamp) * bud.data_len / bud.sampling_rate + total_time))
+                total_time += bud.data_len * bud.packet_number / bud.sampling_rate
         try:
             if sampling_rate == 0:
                 sampling_rate = bud.sampling_rate
@@ -209,7 +217,10 @@ def psd_array_welch_multiple_files(file_folder, file_strs, offset, window_length
         times = offset / bud.sampling_rate + np.arange(total_frame+1) / bud.sampling_rate * n_hop # s 
         # number of freedom
         n_dof = 2
-    return frequencies, times, psd_array, n_dof # Hz, s, V^2/Hz, 1
+    if save_trigger:
+        return frequencies, times, psd_array, trigger_times, n_dof # Hz, s, V^2/Hz, s, 1
+    else:
+        return frequencies, times, psd_array, n_dof # Hz, s, V^2/Hz, 1
 
 
 def psd_array_welch(bud, offset, window_length, n_average, overlap_ratio, n_frame, n_hop, padding_ratio=0, window=None, beta=None):
