@@ -17,22 +17,24 @@ from preprocessing import Preprocessing
 from reconstruct_spectrum import extract_peaks_log_detect
 
 # ================= 1. 路径与配置参数 =================
+# # 8251 (PY84)
+# reconstruct_folder = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/reconstructed/'
+# base_folder        = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/baseline_cutInjection/'
+# raw_folder         = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/cutInjection/'
+# raw_data_folder    = '/mnt/nas82_2/raw_data/puyuan84_data/Data/8251_TestModePY84_26-04-07_22-13-23/'
+# channel_prefix     = 'PY84ch1'
+# output_csv         = '8251_reconstruct_statics_ionMean_decay_5.csv'
 # 8243 (PY82)
 reconstruct_folder = '/mnt/nas_DAQRoom/analyzed_data/puyuan82_data/data/8243_TestModePY82_26-04-07_22-12-25/reconstructed/'
 base_folder        = '/mnt/nas_DAQRoom/analyzed_data/puyuan82_data/data/8243_TestModePY82_26-04-07_22-12-25/baseline_cutInjection/'
 raw_folder         = '/mnt/nas_DAQRoom/analyzed_data/puyuan82_data/data/8243_TestModePY82_26-04-07_22-12-25/cutInjection/'
 raw_data_folder    = '/mnt/nas82_2/raw_data/puyuan82_data/Data/8243_TestModePY82_26-04-07_22-12-25/'
 channel_prefix     = 'PY82ch1'
-output_csv         = '8243_reconstruct_statics_ionMean_decay_3.csv'
-# reconstruct_folder = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/reconstructed/'
-# base_folder        = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/baseline_cutInjection/'
-# raw_folder         = '/mnt/nas_DAQRoom/analyzed_data/puyuan84_data/data/8251_TestModePY84_26-04-07_22-13-23/cutInjection/'
-# raw_data_folder    = '/mnt/nas82_2/raw_data/puyuan84_data/Data/8251_TestModePY84_26-04-07_22-13-23/'
-# channel_prefix     = 'PY84ch1'
-# output_csv         = '8251_reconstruct_statics_ionMean_decay_2.csv'
+output_csv         = '8243_reconstruct_statics_ionMean_decay_5.csv'
 
-fileIdx_range = [0, 799]
+fileIdx_range = [0, 700]
 MAX_WORKERS   = 8  # 并行线程数
+
 
 # ================= 2. 基础信号处理与解析函数 =================
 def parse_npz_filename(filename, prefix="PY82ch1"):
@@ -63,7 +65,12 @@ def is_decayed_in_window(env, fs, start_idx, threshold_ratio=0.3):
         return False
     
     # 获取生成后的稳态信号均值
-    stable_signal = env[start_idx + int(0.02 * fs) : start_idx + int(0.1 * fs)]
+    end_idx_stable = min(len(env), start_idx + int(0.1 * fs))
+    start_idx_stable = start_idx + int(0.01 * fs)
+    if start_idx_stable >= end_idx_stable:
+        return False
+
+    stable_signal = env[start_idx_stable:end_idx_stable]
     if len(stable_signal) == 0:
         return False
     baseline_high = np.mean(stable_signal)
@@ -71,6 +78,7 @@ def is_decayed_in_window(env, fs, start_idx, threshold_ratio=0.3):
     # 检查尾部信号是否显著下降
     tail_signal = np.mean(env[-int(0.05 * fs):])
     return tail_signal < (baseline_high * threshold_ratio)
+
 
 # ================= 3. 精确衰变计算算法 =================
 def compute_precise_chain_decay(raw_data, raw_times, fs, parent_freq, daughter_freq, approx_t):
@@ -83,8 +91,8 @@ def compute_precise_chain_decay(raw_data, raw_times, fs, parent_freq, daughter_f
     diff_env = daughter_env - parent_env
 
     # 围绕先验时刻 approx_t 展开 0.2s 的搜索窗口
-    t_start = max(0.1, approx_t - 0.1)
-    t_end = min(raw_times[-1] - 0.05, approx_t + 0.1)
+    t_start = max(0.01, approx_t - 0.1)
+    t_end = min(raw_times[-1] - 0.01, approx_t + 0.1)
     search_mask = (raw_times >= t_start) & (raw_times <= t_end)
     search_indices = np.where(search_mask)[0]
     
@@ -138,7 +146,6 @@ def compute_precise_single_decay(raw_data, raw_times, fs, peak_freq, exist_state
     t_sub = raw_times[::ds]
     env_sub = env[::ds]
 
-    # exist_state == 1 代表消失沿（下降沿），3 代表生成沿（上升沿）
     if exist_state == 1:
         def step_func(t, A, B, t0, sigma_t):
             return 0.5 * A * (1 - erf((t - t0) / (np.sqrt(2) * sigma_t))) + B
@@ -147,9 +154,13 @@ def compute_precise_single_decay(raw_data, raw_times, fs, peak_freq, exist_state
             return 0.5 * A * (1 + erf((t - t0) / (np.sqrt(2) * sigma_t))) + B
 
     p0 = [np.ptp(env_sub), np.min(env_sub), approx_time, 0.005]
+    
+    # 动态适应 approx_time 上下界，避免 bounds 冲突和越界
+    t0_min = max(0.0, approx_time - 0.2)
+    t0_max = min(raw_times[-1], approx_time + 0.2)
     bounds = (
-        [0, 0, 0.05, 0.0001],
-        [np.inf, np.inf, min(raw_times[-1], approx_time + 0.3), 0.05]
+        [0, 0, t0_min, 0.0001],
+        [np.inf, np.inf, t0_max, 0.05]
     )
 
     try:
@@ -163,6 +174,7 @@ def compute_precise_single_decay(raw_data, raw_times, fs, peak_freq, exist_state
         return t_event, sigma_total
     except Exception:
         return approx_time, 1.0 / (2.0 * bandwidth)
+
 
 # ================= 4. 单个 Trigger 的处理函数 =================
 def process_single_trigger(fname, bud_curr, bud_next_cache, total_triggers, fs):
@@ -215,37 +227,80 @@ def process_single_trigger(fname, bud_curr, bud_next_cache, total_triggers, fs):
     for p in peaks:
         p['pair_num'] = 0
         p['valid'] = 1
-        p['is_stable_in_window'] = False
+        p['is_stable'] = False  # 替换 is_stable_in_window，记录产生后是否发生衰变
 
-    # ------------ 1. 松散事件配对 (寻找 A 消失与 B/C 生成的交叉节点 t1) ------------
+    # ------------ 1. 精确时间极小化配对 (频差敏感的严格匹配机制) ------------
     pair_counter = 0
     node_t1_pairs = []  # 存储 (idx_A, idx_child, approx_t1, pair_num)
+    matched_children = set()  # 记录已被配对的子核，防止重复抢占
 
-    for i, p_A in enumerate(peaks):
-        if p_A['exist_state'] == 1:
-            t_A_end = p_A.get('exist_time', total_time / 2.0)
-            
-            # 优先匹配 B (State 2)
-            matched_child = False
-            for j, p_B in enumerate(peaks):
-                if p_B['exist_state'] == 2:
-                    t_B_start = p_B.get('start_time', total_time - p_B.get('exist_time', 0))
-                    # 只要交界时间差在 3 个 PSD 时间步长内，即判定为事件节点配对
-                    if abs(t_A_end - t_B_start) <= 3 * p_time_interval:
-                        pair_counter += 1
-                        node_t1_pairs.append((i, j, t_A_end, pair_counter))
-                        matched_child = True
-                        break
+    # 频差敏感配对门限参数
+    FREQ_DELTA_THRESH = 5000.0   # 5 kHz 频差界限
+    NORMAL_TIME_WINDOW = 0.30    # 普通频差允许的最大时间差 (s)
+    STRICT_TIME_WINDOW = 0.05    # 大频差(>5kHz)下严格允许的最大时间差 (s)
 
-            # 如果没找到 B，看是否直接匹配 C (State 3, 如大角度散射或特例)
-            if not matched_child:
-                for k, p_C in enumerate(peaks):
-                    if p_C['exist_state'] == 3:
-                        t_C_start = p_C.get('start_time', total_time - p_C.get('exist_time', 0))
-                        if abs(t_A_end - t_C_start) <= 3 * p_time_interval:
-                            pair_counter += 1
-                            node_t1_pairs.append((i, k, t_A_end, pair_counter))
-                            break
+    # ---- 第一阶段：主衰变链配对 (State 1 -> State 2) ----
+    peaks_state1 = [i for i, p in enumerate(peaks) if p['exist_state'] == 1]
+    
+    for i in peaks_state1:
+        p_A = peaks[i]
+        t_A_end = p_A.get('exist_time', total_time / 2.0)
+        freq_A = p_A['peak_pos']
+
+        best_child_idx = None
+        min_time_diff = float('inf')
+
+        # 遍历寻找时间最接近的 State 2 子核候选
+        for j, p_child in enumerate(peaks):
+            if p_child['exist_state'] == 2 and j not in matched_children and i != j:
+                t_child_start = p_child.get('start_time', total_time - p_child.get('exist_time', 0))
+                freq_child = p_child['peak_pos']
+                
+                time_diff = abs(t_A_end - t_child_start)
+                delta_freq = abs(freq_A - freq_child)
+
+                # 动态时间阈值判定：频差 > 5kHz 时，必须满足严格的极短时间差
+                allowed_window = STRICT_TIME_WINDOW if delta_freq > FREQ_DELTA_THRESH else NORMAL_TIME_WINDOW
+
+                if time_diff < allowed_window and time_diff < min_time_diff:
+                    min_time_diff = time_diff
+                    best_child_idx = j
+
+        if best_child_idx is not None:
+            pair_counter += 1
+            node_t1_pairs.append((i, best_child_idx, t_A_end, pair_counter))
+            matched_children.add(best_child_idx)
+
+    # ---- 第二阶段：二级衰变链配对 (State 2 -> State 3) ----
+    peaks_state2 = [i for i, p in enumerate(peaks) if p['exist_state'] == 2]
+
+    for i in peaks_state2:
+        p_A = peaks[i]
+        t_A_end = p_A.get('exist_time', total_time / 2.0)
+        freq_A = p_A['peak_pos']
+
+        best_child_idx = None
+        min_time_diff = float('inf')
+
+        # 寻找时间最接近的 State 3 孙核候选
+        for j, p_child in enumerate(peaks):
+            if p_child['exist_state'] == 3 and j not in matched_children and i != j:
+                t_child_start = p_child.get('start_time', total_time - p_child.get('exist_time', 0))
+                freq_child = p_child['peak_pos']
+
+                time_diff = abs(t_A_end - t_child_start)
+                delta_freq = abs(freq_A - freq_child)
+
+                allowed_window = STRICT_TIME_WINDOW if delta_freq > FREQ_DELTA_THRESH else NORMAL_TIME_WINDOW
+
+                if time_diff < allowed_window and time_diff < min_time_diff:
+                    min_time_diff = time_diff
+                    best_child_idx = j
+
+        if best_child_idx is not None:
+            pair_counter += 1
+            node_t1_pairs.append((i, best_child_idx, t_A_end, pair_counter))
+            matched_children.add(best_child_idx)
 
     # ------------ 2. 精确节点时刻求解 ------------
     t1_exact_dict = {}
@@ -267,56 +322,60 @@ def process_single_trigger(fname, bud_curr, bud_next_cache, total_triggers, fs):
         st = p['exist_state']
 
         if st == 0:
-            # 贯穿核
-            p['exist_time'] = total_time
+            # 【从注入开始完全没有发生衰变的离子】
+            p['exist_time'] = total_time  # 存活时间等于整个观测窗口
             p['err_exist_time'] = 0.0
-            p['is_stable_in_window'] = True
+            p['is_stable'] = True  # 未发生衰变
 
         elif st == 1:
-            # 【母核 A】
+            # 【注入后在观测窗口内发生衰变的母核】
             if idx in t1_exact_dict:
-                # 成功与子核配对：差分包络过零点精确求解
-                p['exist_time'], p['err_exist_time'] = t1_exact_dict[idx]
+                # 成功与子核配对：过零点精确求解衰变时刻 t1
+                t_decay, err_decay = t1_exact_dict[idx]
             else:
-                # A 衰变后完全看不到子核（飞出储能环等）：退回单信号下降沿 fitting
+                # 盲衰变（未看到子核）：下降沿 fitting 拟合衰变时刻
+                app_t = p.get('exist_time', total_time / 2.0)
                 t_decay, err_decay = compute_precise_single_decay(
-                    raw_iq_data, raw_iq_times, fs, p['peak_pos'], 1, p.get('exist_time', total_time / 2.0)
+                    raw_iq_data, raw_iq_times, fs, p['peak_pos'], 1, app_t
                 )
-                p['exist_time'] = t_decay
-                p['err_exist_time'] = err_decay
+
+            p['exist_time'] = max(0.0, t_decay)  # 注入点为0，存活时间 Delta_t = t_decay - 0
+            p['err_exist_time'] = err_decay
+            p['is_stable'] = False  # 发生了衰变
 
         elif st in [2, 3]:
-            # 【子核 B 或 孙核 C】
-            # 1. 获取精确生成时刻 t1
+            # 【由某种离子产生 (State 2) 或由 State 2 衰变产生 (State 3)】
+            # 1. 获取精确生成时刻 t_birth (t1)
             if '_exact_birth' in p:
-                t1, err_t1 = p['_exact_birth']
+                t_birth, err_birth = p['_exact_birth']
             else:
-                # 孤立子核（没看到 A）：拟合自身上升沿
+                # 未配对到的孤立子核：拟合自身上升沿得到生成时刻
                 app_birth = total_time - p.get('exist_time', total_time / 2.0)
-                t1, err_t1 = compute_precise_single_decay(
+                app_birth = max(0.01, min(total_time - 0.01, app_birth))
+                t_birth, err_birth = compute_precise_single_decay(
                     raw_iq_data, raw_iq_times, fs, p['peak_pos'], 3, app_birth
                 )
 
-            # 2. 判断 B/C 是否在观测窗口内发生了衰变
+            # 2. 判断产生之后在剩余窗口内是否再次发生衰变
             bandwidth = 1500.0
             env_sub = extract_envelope(raw_iq_data, p['peak_pos'], bandwidth, fs)
-            start_idx = int(t1 * fs)
+            start_idx = int(t_birth * fs)
             has_decayed = is_decayed_in_window(env_sub, fs, start_idx)
 
             if has_decayed:
-                # B 发生了衰变（极少数情况）：拟合其下降沿 t2
-                app_t2 = p.get('end_time', t1 + 0.5)
-                t2, err_t2 = compute_precise_single_decay(
-                    raw_iq_data, raw_iq_times, fs, p['peak_pos'], 1, app_t2
+                # 产生后又发生了衰变：拟合下降沿时刻 t_death
+                app_death = max(t_birth + 0.01, min(total_time - 0.01, t_birth + 0.5))
+                t_death, err_death = compute_precise_single_decay(
+                    raw_iq_data, raw_iq_times, fs, p['peak_pos'], 1, app_death
                 )
-                p['exist_time'] = max(0.0, t2 - t1)
-                p['err_exist_time'] = np.sqrt(err_t1**2 + err_t2**2)
-                p['is_stable_in_window'] = False
+                p['exist_time'] = max(0.0, t_death - t_birth)  # 存活时间 = 消失时刻 - 产生时刻
+                p['err_exist_time'] = np.sqrt(err_birth**2 + err_death**2)
+                p['is_stable'] = False  # 发生衰变
             else:
-                # B 大概率不发生衰变（长寿命/稳定核，贯穿至窗口末尾）
-                p['exist_time'] = t1  # 记录生成时刻 t1（代表母核寿命或 B 生成点）
-                p['err_exist_time'] = err_t1
-                p['is_stable_in_window'] = True
+                # 产生后贯穿至窗口末尾：存活时间 = 窗口结束时刻 - 产生时刻
+                p['exist_time'] = max(0.0, total_time - t_birth)
+                p['err_exist_time'] = err_birth
+                p['is_stable'] = True  # 未发生衰变
 
     for p in peaks:
         p['filename'] = fname
@@ -330,6 +389,7 @@ def format_time(seconds):
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
 
 # ================= 5. 主程序与 Benchmark 统计 =================
 if __name__ == '__main__':
@@ -366,7 +426,7 @@ if __name__ == '__main__':
     fieldnames = [
         'peak_pos', 'err_pos', 'sigma', 'err_sigma', 'height_ratio', 'height_ion', 
         'exist_state', 'exist_time', 'err_exist_time', 'valid', 'pair_num', 
-        'is_stable_in_window', 'filename'
+        'is_stable', 'filename'
     ]
 
     if mode == 'w':
@@ -382,8 +442,8 @@ if __name__ == '__main__':
     total_data_count = len(todo_seq_nums)
     print(f"\n==================== 任务初始化完成 ====================")
     print(f"待处理 .data 文件数 : {total_data_count} 个")
-    print(f"包含 trigger 注入点   : {total_matched_files} 个")
-    print(f"并行计算线程数       : {MAX_WORKERS}")
+    print(f"包含 trigger 注入点    : {total_matched_files} 个")
+    print(f"并行计算线程数        : {MAX_WORKERS}")
     print(f"========================================================\n")
 
     # Benchmark 变量定义
@@ -431,20 +491,20 @@ if __name__ == '__main__':
                 except Exception as e:
                     print(f"错误: 线程处理 {fname} 异常 -> {e}")
 
-        # 3. 追加写写盘
+        # 3. 追加写盘
         if batch_results:
             with open(output_csv, 'a', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 for peak_row in batch_results:
                     writer.writerow(peak_row)
 
-        # 4. 【Benchmark 统计与节点打印】
+        # 4. Benchmark 统计与节点打印
         data_elapsed = time.time() - data_start_time
         time_history.append(data_elapsed)
         completed_data_count += 1
         
         remaining_data_count = total_data_count - completed_data_count
-        avg_time_per_data = np.mean(time_history[-10:])  # 取最近 10 个文件的移动平均耗时
+        avg_time_per_data = np.mean(time_history[-10:])  # 最近 10 个文件的移动平均耗时
         eta_seconds = remaining_data_count * avg_time_per_data
         
         pct = (completed_data_count / total_data_count) * 100
