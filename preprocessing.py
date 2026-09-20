@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from nptdms import TdmsFile
 from typing import List, Dict, Tuple
 from datetime import datetime, timedelta
-import json, sys, os.path, struct, warnings, re
+import json, sys, os.path, struct, warnings, re, argparse
 
 def bcd_to_int(bcd_byte):
     '''transfer HEX directly to base-10, e.g. 0x46 -> 46'''
@@ -385,8 +385,10 @@ class Preprocessing(object):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: {} path/to/file".format(__file__))
-        sys.exit()
-    preprocessing = Preprocessing(sys.argv[-1])
+    parser = argparse.ArgumentParser(description="Data Preprocessing")
+    parser.add_argument("file_str", type=str, help="Data's addr")
+    parser.add_argument(
+            "--puyuan_new", type=lambda x: (str(x).lower() in ["true", "1", "yes"]), default=False, help="using puyuan_new mode or not (default: False)")
+    args = parser.parse_args()
+    preprocessing = Preprocessing(args.file_str, puyuan_new=args.puyuan_new)
     preprocessing.diagnosis()
